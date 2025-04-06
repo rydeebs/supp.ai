@@ -549,20 +549,20 @@ def categorize_supplement(ingredients_text):
     logging.info(f"Categorized as {best_category} > {best_subcategory}")
     return best_category, best_subcategory
 
-# Enhanced function to scrape product data with focus on images and ingredients
+# Enhanced scraper specifically improved for retailer websites
 def scrape_product_from_url(brand_name, product_name, product_url):
     """
     Scrape supplement data directly from a product webpage with focus on ingredients and images
     
     Parameters:
-    - brand_name (str): Brand name of the supplement
-    - product_name (str): Name of the supplement product
-    - product_url (str): Direct URL to the product page on the brand's website
+    - brand_name (str): Initial brand name guess (will be updated if better info found)
+    - product_name (str): Initial product name guess (will be updated if better info found)
+    - product_url (str): Direct URL to the product page on the website
     
     Returns:
     - dict: Product data including image URLs and ingredients
     """
-    logging.info(f"Scraping data for {brand_name} {product_name} from {product_url}")
+    logging.info(f"Scraping data from {product_url}")
     
     if not product_url:
         logging.error("No product URL provided")
@@ -575,7 +575,7 @@ def scrape_product_from_url(brand_name, product_name, product_url):
         'website': product_url,
         'image_url': '',
         'ingredients': '',
-        'ingredient_image_url': '',  # New field for ingredient label image
+        'ingredient_image_url': '',  # For ingredient label image
         'directions': '',
         'warnings': '',
         'serving_size': '',
@@ -589,6 +589,23 @@ def scrape_product_from_url(brand_name, product_name, product_url):
         'organic': False,
         'country_of_origin': '',
     }
+    
+    # Identify retailer from URL to use appropriate scraping strategy
+    retailer = "unknown"
+    if "target.com" in product_url:
+        retailer = "target"
+    elif "amazon.com" in product_url:
+        retailer = "amazon"
+    elif "walmart.com" in product_url:
+        retailer = "walmart"
+    elif "gnc.com" in product_url:
+        retailer = "gnc"
+    elif "vitaminshoppe.com" in product_url:
+        retailer = "vitaminshoppe"
+    elif "iherb.com" in product_url:
+        retailer = "iherb"
+    
+    logging.info(f"Detected retailer: {retailer}")
     
     # Set up headers to mimic a browser request
     headers = {
@@ -616,402 +633,473 @@ def scrape_product_from_url(brand_name, product_name, product_url):
         domain = extract_domain(product_url)
         
         #---------------------------------------------------------------------------
-        # 1. FIND MAIN PRODUCT IMAGE
+        # 1. EXTRACT ACCURATE BRAND AND PRODUCT NAME
         #---------------------------------------------------------------------------
-        # Check common image selectors
-        image_selectors = [
-            # Common product image selectors
-            'img.product-image', 'img.productImage', 'img.product_image',
-            'img.main-image', 'img.mainImage', 'img.primary-image', 
-            '.product-main-image img', '.product-media img',
-            '.product-image-container img', '.product-image-gallery img',
-            # Additional selectors for specific platforms
-            '.woocommerce-product-gallery__image img',  # WooCommerce
-            '.product-single__photo img',  # Shopify
-            '.product-photo-container img',  # More Shopify
-            '[data-component="ProductImage"] img',  # Squarespace
-            '.main-product-image img',  # Generic
-            '.gallery-image-container img',  # More generic
-        ]
         
-        # Try each image selector
-        product_img = None
-        for selector in image_selectors:
-            img_tags = soup.select(selector)
-            if img_tags:
-                product_img = img_tags[0]
-                break
+        # Retailer-specific extractors for brand and product name
+        if retailer == "target":
+            # Target usually has a clear brand name at the top
+            brand_elements = soup.select('[data-test="product-brand"]')
+            if brand_elements:
+                product_data['brand'] = brand_elements[0].get_text(strip=True)
+            
+            # Get product title
+            title_elements = soup.select('[data-test="product-title"]')
+            if title_elements:
+                product_data['product_name'] = title_elements[0].get_text(strip=True)
+                
+        elif retailer == "amazon":
+            # Try to find brand from the "Brand" info section
+            brand_sections = soup.find_all('tr', class_='a-spacing-small')
+            for section in brand_sections:
+                if section.find(text=re.compile('Brand|Marca')):
+                    brand_value = section.find('td', class_='a-span9')
+                    if brand_value:
+                        product_data['brand'] = brand_value.get_text(strip=True)
+                        break
+            
+            # If not found, try the byline
+            if not product_data['brand'] or product_data['brand'] == brand_name:
+                byline = soup.select('#bylineInfo')
+                if byline:
+                    brand_text = byline[0].get_text(strip=True)
+                    # Extract brand name from "Brand: Optimum Nutrition"
+                    if ':' in brand_text:
+                        product_data['brand'] = brand_text.split(':', 1)[1].strip()
+                    else:
+                        product_data['brand'] = brand_text
+            
+            # Get product title
+            title_element = soup.select('#productTitle')
+            if title_element:
+                product_data['product_name'] = title_element[0].get_text(strip=True)
+                
+        elif retailer == "walmart":
+            # Walmart often shows brand in the product specs section
+            brand_sections = soup.find_all('div', class_='specTable-value')
+            for section in brand_sections:
+                if section.find_previous('div', class_='specTable-label') and 'brand' in section.find_previous('div', class_='specTable-label').get_text().lower():
+                    product_data['brand'] = section.get_text(strip=True)
+                    break
+            
+            # Get product title
+            title_elements = soup.select('h1.prod-ProductTitle')
+            if title_elements:
+                product_data['product_name'] = title_elements[0].get_text(strip=True)
         
-        # If no image found with selectors, look for any image containing the product name in alt text or nearby text
-        if not product_img:
+        # Generic approach for other retailers
+        if not product_data['brand'] or product_data['brand'] == brand_name:
+            # Common selectors for brand info
+            brand_selectors = [
+                '.brand', '.product-brand', '.product_brand', 
+                '[itemprop="brand"]', '.manufacturer', 
+                '.vendor', '.product-vendor', 
+                'meta[property="og:brand"]', 'meta[name="brand"]'
+            ]
+            
+            for selector in brand_selectors:
+                elements = soup.select(selector)
+                if elements:
+                    if elements[0].name == 'meta':
+                        product_data['brand'] = elements[0].get('content', '')
+                    else:
+                        product_data['brand'] = elements[0].get_text(strip=True)
+                    break
+        
+        # Clean up brand (remove "Brand:", "by", etc.)
+        if product_data['brand']:
+            for prefix in ['Brand:', 'by ', 'By ', 'Visit the ', 'From ', 'from ']:
+                if product_data['brand'].startswith(prefix):
+                    product_data['brand'] = product_data['brand'][len(prefix):].strip()
+        
+        # Generic approach for product name if not already found
+        if not product_data['product_name'] or product_data['product_name'] == product_name:
+            # Common selectors for product name
+            name_selectors = [
+                'h1.product-title', 'h1.product_title', 'h1.productName',
+                'h1[itemprop="name"]', '.product-name', '.product_name',
+                'meta[property="og:title"]', 'meta[name="title"]'
+            ]
+            
+            for selector in name_selectors:
+                elements = soup.select(selector)
+                if elements:
+                    if elements[0].name == 'meta':
+                        product_data['product_name'] = elements[0].get('content', '')
+                    else:
+                        product_data['product_name'] = elements[0].get_text(strip=True)
+                    break
+        
+        # If we still don't have a product name, use the page title as last resort
+        if not product_data['product_name'] or product_data['product_name'] == product_name:
+            title_tag = soup.find('title')
+            if title_tag:
+                title_text = title_tag.get_text(strip=True)
+                # Some cleanup - remove store name, etc.
+                for store in ['Amazon.com', 'Walmart.com', 'Target', 'GNC', 'The Vitamin Shoppe']:
+                    if store in title_text:
+                        title_text = title_text.split(store)[0].strip()
+                product_data['product_name'] = title_text
+        
+        # Clean up product name (remove brand name if it appears at the beginning)
+        if product_data['brand'] and product_data['product_name'].startswith(product_data['brand']):
+            product_data['product_name'] = product_data['product_name'][len(product_data['brand']):].strip(' -:')
+        
+        logging.info(f"Extracted brand: {product_data['brand']}")
+        logging.info(f"Extracted product name: {product_data['product_name']}")
+        
+        #---------------------------------------------------------------------------
+        # 2. FIND MAIN PRODUCT IMAGE
+        #---------------------------------------------------------------------------
+        
+        # Retailer-specific image extraction
+        main_image_found = False
+        
+        if retailer == "target":
+            # Target usually has primary image with specific data attributes
+            image_elements = soup.select('[data-test="product-image"]')
+            if image_elements:
+                img_tag = image_elements[0].find('img')
+                if img_tag and 'src' in img_tag.attrs:
+                    product_data['image_url'] = img_tag['src']
+                    # Sometimes the src is a small thumbnail, look for larger version
+                    if 'srcset' in img_tag.attrs:
+                        srcset = img_tag['srcset']
+                        largest_img = srcset.split(',')[-1].strip().split(' ')[0]
+                        if largest_img:
+                            product_data['image_url'] = largest_img
+                    main_image_found = True
+        
+        elif retailer == "amazon":
+            # Try to find Amazon's main product image
+            image_elements = soup.select('#landingImage, #imgBlkFront')
+            if image_elements:
+                if 'data-old-hires' in image_elements[0].attrs:
+                    product_data['image_url'] = image_elements[0]['data-old-hires']
+                    main_image_found = True
+                elif 'src' in image_elements[0].attrs:
+                    product_data['image_url'] = image_elements[0]['src']
+                    main_image_found = True
+        
+        # Generic image finding if retailer-specific approach didn't work
+        if not main_image_found:
+            # Check common image selectors
+            image_selectors = [
+                # Common product image selectors
+                'img.product-image', 'img.productImage', 'img.product_image',
+                'img.main-image', 'img.mainImage', 'img.primary-image', 
+                '.product-main-image img', '.product-media img',
+                '.product-image-container img', '.product-image-gallery img',
+                # Additional selectors for specific platforms
+                '.woocommerce-product-gallery__image img',  # WooCommerce
+                '.product-single__photo img',  # Shopify
+                '.product-photo-container img',  # More Shopify
+                '[data-component="ProductImage"] img',  # Squarespace
+                '.main-product-image img',  # Generic
+                '.gallery-image-container img',  # More generic
+                # Open Graph image as fallback
+                'meta[property="og:image"]'
+            ]
+            
+            # Try each image selector
+            for selector in image_selectors:
+                img_tags = soup.select(selector)
+                if img_tags:
+                    if img_tags[0].name == 'meta':
+                        product_data['image_url'] = img_tags[0].get('content', '')
+                    elif 'src' in img_tags[0].attrs:
+                        product_data['image_url'] = img_tags[0]['src']
+                    
+                    if product_data['image_url']:
+                        main_image_found = True
+                        break
+        
+        # If no image found with selectors, try looking for any large image that might be the product
+        if not main_image_found:
             all_images = soup.find_all('img')
-            product_name_parts = product_name.lower().split()
+            product_name_parts = product_data['product_name'].lower().split()
             
             for img in all_images:
                 # Check alt text
                 alt_text = img.get('alt', '').lower()
                 if any(part in alt_text for part in product_name_parts):
-                    product_img = img
-                    break
-                
-                # Check src URL
-                src = img.get('src', '').lower()
-                if any(part in src for part in product_name_parts):
-                    product_img = img
+                    product_data['image_url'] = img.get('src', '')
                     break
                 
                 # If this is a large enough image (likely a product image)
                 width = img.get('width')
                 height = img.get('height')
                 if width and height and int(width) > 300 and int(height) > 300:
-                    product_img = img
+                    product_data['image_url'] = img.get('src', '')
                     break
         
-        # Extract the image URL
-        if product_img:
-            image_url = product_img.get('src', '')
-            if image_url:
-                # Handle relative URLs
-                if image_url.startswith('/'):
-                    image_url = f"{domain}{image_url}"
-                # Handle protocol-relative URLs
-                elif image_url.startswith('//'):
-                    image_url = f"https:{image_url}"
-                    
-                logging.info(f"Found product image: {image_url}")
-                product_data['image_url'] = image_url
+        # Handle relative URLs
+        if product_data['image_url']:
+            if product_data['image_url'].startswith('/'):
+                product_data['image_url'] = f"{domain}{product_data['image_url']}"
+            # Handle protocol-relative URLs
+            elif product_data['image_url'].startswith('//'):
+                product_data['image_url'] = f"https:{product_data['image_url']}"
+                
+            logging.info(f"Found product image: {product_data['image_url']}")
         
         #---------------------------------------------------------------------------
-        # 2. FIND INGREDIENTS IN TEXT
+        # 3. FIND INGREDIENTS IN TEXT
         #---------------------------------------------------------------------------
-        # Look for common ingredient section identifiers
-        ingredient_identifiers = [
-            # Headers and section titles
-            'Ingredients', 'INGREDIENTS', 'ingredients', 
-            'Ingredient List', 'Supplement Facts',
-            # HTML attributes
-            'id="ingredients"', 'class="ingredients"',
-            'data-tab="ingredients"', 'data-section="ingredients"',
-            # Labels
-            'Ingredients:', 'Active Ingredients:', 'Contains:',
-            # More specific variations
-            'Other Ingredients', 'Inactive Ingredients',
-            'Supplement Facts', 'Nutrition Facts',
-            'Medicinal Ingredients', 'Non-Medicinal Ingredients'
-        ]
         
-        ingredients_text = ''
+        # Retailer-specific approach for ingredients
+        ingredients_found = False
         
-        # Method 1: Try to find dedicated ingredients section
-        for identifier in ingredient_identifiers:
-            # Try to find headers with this text
-            headers = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'dt', 'strong'], 
-                                  string=lambda s: s and identifier.lower() in s.lower())
+        if retailer == "target":
+            # Target usually has details section
+            details_tab = soup.select('[data-test="detailsTab"]')
+            if details_tab:
+                details_sections = details_tab[0].find_all('div', class_='h-padding-h-default')
+                for section in details_sections:
+                    if 'Ingredients' in section.get_text() or 'ingredients' in section.get_text().lower():
+                        ingredients_text = section.get_text(strip=True)
+                        # Try to extract just the ingredient part
+                        if ':' in ingredients_text:
+                            ingredients_text = ingredients_text.split(':', 1)[1].strip()
+                        product_data['ingredients'] = ingredients_text
+                        ingredients_found = True
+                        break
+        
+        elif retailer == "amazon":
+            # Amazon often has product details in a structured format
+            detail_sections = soup.select('#productDetails, #detailBullets_feature_div, #detail-bullets')
+            for section in detail_sections:
+                if 'Ingredients' in section.get_text() or 'ingredients' in section.get_text().lower():
+                    # Try to find the ingredient section
+                    li_elements = section.find_all('li')
+                    for li in li_elements:
+                        if 'Ingredients' in li.get_text() or 'ingredients' in li.get_text().lower():
+                            ingredients_text = li.get_text(strip=True)
+                            # Extract just the ingredients
+                            if ':' in ingredients_text:
+                                ingredients_text = ingredients_text.split(':', 1)[1].strip()
+                            product_data['ingredients'] = ingredients_text
+                            ingredients_found = True
+                            break
             
-            for header in headers:
-                # Get the next paragraph or div after this header
-                ingredient_section = header.find_next(['p', 'div', 'span', 'ul', 'li'])
+            # Amazon also sometimes has a dedicated section
+            if not ingredients_found:
+                ingredient_section = soup.select('#important-information .content')
                 if ingredient_section:
-                    ingredients_text = ingredient_section.get_text(strip=True)
-                    if ingredients_text and len(ingredients_text) > 10:
-                        break
+                    product_data['ingredients'] = ingredient_section[0].get_text(strip=True)
+                    ingredients_found = True
+        
+        # Generic approach if retailer-specific didn't work
+        if not ingredients_found:
+            # Look for common ingredient section identifiers
+            ingredient_identifiers = [
+                # Headers and section titles
+                'Ingredients', 'INGREDIENTS', 'ingredients', 
+                'Ingredient List', 'Supplement Facts',
+                # HTML attributes
+                'id="ingredients"', 'class="ingredients"',
+                'data-tab="ingredients"', 'data-section="ingredients"',
+                # Labels
+                'Ingredients:', 'Active Ingredients:', 'Contains:',
+                # More specific variations
+                'Other Ingredients', 'Inactive Ingredients',
+                'Supplement Facts', 'Nutrition Facts',
+                'Medicinal Ingredients', 'Non-Medicinal Ingredients'
+            ]
             
-            if ingredients_text and len(ingredients_text) > 10:
-                break
+            # Method 1: Try to find dedicated ingredients section
+            for identifier in ingredient_identifiers:
+                # Try to find headers with this text
+                headers = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'dt', 'strong'], 
+                                      string=lambda s: s and identifier.lower() in s.lower())
                 
-            # Try to find divs with matching IDs or classes
-            if 'id=' in identifier or 'class=' in identifier:
-                attr_name, attr_value = identifier.split('=')
-                attr_name = attr_name.strip()
-                attr_value = attr_value.strip('"\'')
+                for header in headers:
+                    # Get the next paragraph or div after this header
+                    ingredient_section = header.find_next(['p', 'div', 'span', 'ul', 'li'])
+                    if ingredient_section:
+                        ingredients_text = ingredient_section.get_text(strip=True)
+                        if ingredients_text and len(ingredients_text) > 10:
+                            product_data['ingredients'] = ingredients_text
+                            ingredients_found = True
+                            break
                 
-                sections = soup.find_all(attrs={attr_name: attr_value})
-                if sections:
-                    ingredients_text = sections[0].get_text(strip=True)
-                    if ingredients_text and len(ingredients_text) > 10:
-                        break
-        
-        # Method 2: If no dedicated section found, look for paragraphs containing ingredient keywords
-        if not ingredients_text or len(ingredients_text) < 10:
-            ingredient_keywords = ['ingredient', 'contains', 'formulation', 'composition']
-            paragraphs = soup.find_all(['p', 'div', 'span', 'li'])
+                if ingredients_found:
+                    break
+                    
+                # Try to find divs with matching IDs or classes
+                if 'id=' in identifier or 'class=' in identifier:
+                    attr_name, attr_value = identifier.split('=')
+                    attr_name = attr_name.strip()
+                    attr_value = attr_value.strip('"\'')
+                    
+                    sections = soup.find_all(attrs={attr_name: attr_value})
+                    if sections:
+                        ingredients_text = sections[0].get_text(strip=True)
+                        if ingredients_text and len(ingredients_text) > 10:
+                            product_data['ingredients'] = ingredients_text
+                            ingredients_found = True
+                            break
             
-            for p in paragraphs:
-                text = p.get_text(strip=True).lower()
-                if any(keyword in text for keyword in ingredient_keywords) and len(text) > 30:
-                    ingredients_text = p.get_text(strip=True)
-                    if ingredients_text and len(ingredients_text) > 10:
-                        break
+            # Method 2: If no dedicated section found, look for paragraphs containing ingredient keywords
+            if not ingredients_found:
+                ingredient_keywords = ['ingredient', 'contains', 'formulation', 'composition']
+                paragraphs = soup.find_all(['p', 'div', 'span', 'li'])
+                
+                for p in paragraphs:
+                    text = p.get_text(strip=True).lower()
+                    if any(keyword in text for keyword in ingredient_keywords) and len(text) > 30:
+                        ingredients_text = p.get_text(strip=True)
+                        if ingredients_text and len(ingredients_text) > 10:
+                            product_data['ingredients'] = ingredients_text
+                            ingredients_found = True
+                            break
+            
+            # Method 3: Try to find tables that might contain ingredients
+            if not ingredients_found:
+                tables = soup.find_all('table')
+                for table in tables:
+                    table_text = table.get_text().lower()
+                    if 'ingredient' in table_text or 'supplement facts' in table_text:
+                        ingredients_text = table.get_text(strip=True)
+                        if ingredients_text and len(ingredients_text) > 10:
+                            product_data['ingredients'] = ingredients_text
+                            ingredients_found = True
+                            break
         
-        # Method 3: Try to find tables that might contain ingredients
-        if not ingredients_text or len(ingredients_text) < 10:
-            tables = soup.find_all('table')
-            for table in tables:
-                table_text = table.get_text().lower()
-                if 'ingredient' in table_text or 'supplement facts' in table_text:
-                    ingredients_text = table.get_text(strip=True)
-                    if ingredients_text and len(ingredients_text) > 10:
-                        break
-        
-        if ingredients_text and len(ingredients_text) > 10:
-            logging.info(f"Found ingredients in text: {ingredients_text[:100]}...")
-            product_data['ingredients'] = ingredients_text
+        if ingredients_found:
+            logging.info(f"Found ingredients in text: {product_data['ingredients'][:100]}...")
         
         #---------------------------------------------------------------------------
-        # 3. FIND INGREDIENT IMAGES (if text ingredients not found or as backup)
+        # 4. FIND INGREDIENT IMAGES (if text ingredients not found or as backup)
         #---------------------------------------------------------------------------
+        
         # Look for images that might contain ingredient lists
         ingredient_img_keywords = [
             'ingredients', 'supplement facts', 'nutrition facts', 'label', 
-            'facts', 'nutritional', 'nutrition information'
+            'facts', 'nutritional', 'nutrition information', 'drug facts'
         ]
         
-        # Track all potential ingredient images
-        potential_ingredient_images = []
+        # Retailer-specific approach
+        ingredient_image_found = False
         
-        # Method 1: Look for images with ingredient-related alt text
-        all_images = soup.find_all('img')
-        for img in all_images:
-            alt_text = img.get('alt', '').lower()
-            src = img.get('src', '').lower()
-            
-            # Skip tiny images that couldn't contain readable ingredients
-            width = img.get('width', '0')
-            height = img.get('height', '0')
-            try:
-                if (width and int(width) < 200) or (height and int(height) < 200):
-                    continue
-            except:
-                pass
-            
-            # Check if any ingredient keyword is in alt text or image URL
-            if any(keyword in alt_text for keyword in ingredient_img_keywords) or \
-               any(keyword in src for keyword in ingredient_img_keywords):
-                image_url = img.get('src', '')
-                if image_url:
-                    # Handle relative URLs
-                    if image_url.startswith('/'):
-                        image_url = f"{domain}{image_url}"
-                    # Handle protocol-relative URLs
-                    elif image_url.startswith('//'):
-                        image_url = f"https:{image_url}"
-                    
-                    score = 0
-                    # Score the image based on keywords in alt text and URL
-                    for keyword in ingredient_img_keywords:
-                        if keyword in alt_text:
-                            score += 2
-                        if keyword in src:
-                            score += 1
-                    
-                    potential_ingredient_images.append((image_url, score))
-        
-        # Method 2: Look for images near ingredient-related headers or sections
-        for identifier in ingredient_identifiers:
-            headers = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'dt', 'strong'], 
-                                  string=lambda s: s and identifier.lower() in s.lower())
-            
-            for header in headers:
-                # Look for images after or before the header
-                img_after = header.find_next('img')
-                img_before = header.find_previous('img')
-                
-                if img_after:
-                    image_url = img_after.get('src', '')
-                    if image_url:
-                        # Handle relative URLs
-                        if image_url.startswith('/'):
-                            image_url = f"{domain}{image_url}"
-                        # Handle protocol-relative URLs
-                        elif image_url.startswith('//'):
-                            image_url = f"https:{image_url}"
-                        
-                        potential_ingredient_images.append((image_url, 3))  # Higher score for images near headers
-                
-                if img_before:
-                    image_url = img_before.get('src', '')
-                    if image_url:
-                        # Handle relative URLs
-                        if image_url.startswith('/'):
-                            image_url = f"{domain}{image_url}"
-                        # Handle protocol-relative URLs
-                        elif image_url.startswith('//'):
-                            image_url = f"https:{image_url}"
-                        
-                        potential_ingredient_images.append((image_url, 2))
-        
-        # Sort by score and select the highest scoring image
-        if potential_ingredient_images:
-            potential_ingredient_images.sort(key=lambda x: x[1], reverse=True)
-            best_ingredient_image = potential_ingredient_images[0][0]
-            product_data['ingredient_image_url'] = best_ingredient_image
-            logging.info(f"Found potential ingredient image: {best_ingredient_image}")
-        
-        #---------------------------------------------------------------------------
-        # 4. OTHER INFORMATION (Directions, warnings, etc.)
-        #---------------------------------------------------------------------------
-        
-        # Look for directions/usage instructions
-        direction_identifiers = [
-            'Directions', 'Suggested Use', 'How to Use', 'Usage', 'Dosage', 
-            'Directions for use', 'Recommended Usage', 'Recommendations'
-        ]
-        
-        directions_text = ''
-        for identifier in direction_identifiers:
-            headers = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'dt', 'strong'], 
-                                  string=lambda s: s and identifier.lower() in s.lower())
-            
-            for header in headers:
-                direction_section = header.find_next(['p', 'div', 'span', 'ul', 'li'])
-                if direction_section:
-                    directions_text = direction_section.get_text(strip=True)
-                    if directions_text:
-                        product_data['directions'] = directions_text
-                        break
-            
-            if directions_text:
-                break
-                
-        # Also look for divs with these terms in class or id
-        if not directions_text:
-            for identifier in ['directions', 'usage', 'suggested-use', 'dosage']:
-                elements = soup.find_all(attrs={"class": lambda x: x and identifier in x.lower() if x else False})
-                elements.extend(soup.find_all(attrs={"id": lambda x: x and identifier in x.lower() if x else False}))
-                
-                if elements:
-                    directions_text = elements[0].get_text(strip=True)
-                    if directions_text:
-                        product_data['directions'] = directions_text
-                        break
-        
-        # Look for warnings
-        warning_identifiers = [
-            'Warning', 'Caution', 'Precaution', 'Safety Information',
-            'Warnings', 'Cautions', 'Safety Warnings', 'Important Information'
-        ]
-        
-        warnings_text = ''
-        for identifier in warning_identifiers:
-            headers = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'dt', 'strong'], 
-                                  string=lambda s: s and identifier.lower() in s.lower())
-            
-            for header in headers:
-                warning_section = header.find_next(['p', 'div', 'span', 'ul', 'li'])
-                if warning_section:
-                    warnings_text = warning_section.get_text(strip=True)
-                    if warnings_text:
-                        product_data['warnings'] = warnings_text
-                        break
-            
-            if warnings_text:
-                break
-                
-        # Also look for divs with these terms in class or id
-        if not warnings_text:
-            for identifier in ['warning', 'caution', 'safety']:
-                elements = soup.find_all(attrs={"class": lambda x: x and identifier in x.lower() if x else False})
-                elements.extend(soup.find_all(attrs={"id": lambda x: x and identifier in x.lower() if x else False}))
-                
-                if elements:
-                    warnings_text = elements[0].get_text(strip=True)
-                    if warnings_text:
-                        product_data['warnings'] = warnings_text
-                        break
-        
-        # Look for certifications and special properties (gluten-free, vegan, etc.)
-        cert_keywords = {
-            'non-gmo': {'key': 'non_gmo', 'variations': ['non gmo', 'non-gmo', 'not gmo', 'gmo free']},
-            'organic': {'key': 'organic', 'variations': ['organic', 'certified organic', 'usda organic']},
-            'vegan': {'key': 'vegan', 'variations': ['vegan', 'plant-based', '100% plant']},
-            'gluten-free': {'key': 'gluten_free', 'variations': ['gluten free', 'gluten-free', 'no gluten', 'without gluten']},
-            'allergen-free': {'key': 'allergen_free', 'variations': ['allergen free', 'free from allergens', 'no allergens']},
-            'gmp': {'key': 'gmp_certified', 'variations': ['gmp', 'good manufacturing practice', 'cgmp', 'certified gmp']},
-            'third-party': {'key': 'third_party_tested', 'variations': ['third party', 'third-party', 'independently tested', 'lab tested', 'lab verified']},
-        }
-        
-        found_certs = []
-        
-        # Method 1: Look for certification images/icons
-        all_images = soup.find_all('img')
-        for img in all_images:
-            alt_text = img.get('alt', '').lower()
-            for cert_key, cert_info in cert_keywords.items():
-                if any(variation in alt_text for variation in cert_info['variations']):
-                    found_certs.append(cert_key)
-                    product_data[cert_info['key']] = True
-        
-        # Method 2: Look for certification text in the page content
-        all_text = soup.get_text().lower()
-        for cert_key, cert_info in cert_keywords.items():
-            for variation in cert_info['variations']:
-                if variation in all_text:
-                    found_certs.append(cert_key)
-                    product_data[cert_info['key']] = True
-                    break
-        
-        # Remove duplicates and join for display
-        found_certs = list(set(found_certs))
-        if found_certs:
-            product_data['certifications'] = ', '.join(found_certs)
-            logging.info(f"Found certifications: {product_data['certifications']}")
-        
-        # Look for serving size
-        serving_identifiers = [
-            'Serving Size', 'Dose', 'Dosage', 'Per Serving', 
-            'Servings Per Container', 'Serving Information'
-        ]
-        
-        serving_text = ''
-        for identifier in serving_identifiers:
-            # Method 1: Look for headers with this text
-            headers = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'dt', 'strong', 'span', 'p'], 
-                                  string=lambda s: s and identifier.lower() in s.lower())
-            
-            for header in headers:
-                # Try different approaches to get the serving information
-                
-                # Approach 1: Get the next element
-                serving_el = header.find_next(['p', 'div', 'span', 'td'])
-                if serving_el:
-                    serving_text = serving_el.get_text(strip=True)
-                
-                # Approach 2: Check if it's part of a definition list (dt/dd)
-                elif header.name == 'dt':
-                    dd = header.find_next('dd')
-                    if dd:
-                        serving_text = dd.get_text(strip=True)
-                
-                # Approach 3: Check parent's text (for table cells)
-                elif header.parent:
-                    parent_text = header.parent.get_text(strip=True)
-                    serving_text = parent_text
-                
-                # Process the found text
-                if serving_text and identifier in serving_text:
-                    # Extract just the serving size part
-                    parts = serving_text.split(identifier)
-                    if len(parts) > 1:
-                        serving_text = parts[1].strip(': ')
-                    product_data['serving_size'] = serving_text
-                    break
-            
-            if serving_text:
-                break
-                
-        # Method 2: Look for supplement facts table
-        if not serving_text:
-            facts_tables = soup.find_all('table')
-            for table in facts_tables:
-                table_text = table.get_text().lower()
-                if 'serving' in table_text and 'size' in table_text:
-                    rows = table.find_all('tr')
-                    for row in rows:
-                        row_text = row.get_text().lower()
-                        if 'serving size' in row_text:
-                            serving_text = row_text.replace('serving size', '').strip(': ')
-                            product_data['serving_size'] = serving_text
+        if retailer == "target" and not ingredient_image_found:
+            # Target often shows nutrition label in image gallery
+            image_gallery = soup.select('[data-test="image-gallery"]')
+            if image_gallery:
+                thumbnail_row = image_gallery[0].find_all('div', {'class': 'thumbnail-row'})
+                if thumbnail_row:
+                    thumbnails = thumbnail_row[0].find_all('button')
+                    for thumb in thumbnails[1:]:  # Skip the first one (main product image)
+                        thumb_img = thumb.find('img')
+                        if thumb_img:
+                            for keyword in ingredient_img_keywords:
+                                if keyword in thumb_img.get('alt', '').lower():
+                                    # This might be an ingredient image - find the corresponding full-size image
+                                    thumb_id = thumb.get('aria-labelledby', '')
+                                    if thumb_id:
+                                        # Extract index from thumbnail id
+                                        index_match = re.search(r'thumbnail-(\d+)', thumb_id)
+                                        if index_match:
+                                            idx = index_match.group(1)
+                                            full_image = soup.select(f'#gallery-image-{idx}')
+                                            if full_image:
+                                                img_tag = full_image[0].find('img')
+                                                if img_tag and 'src' in img_tag.attrs:
+                                                    product_data['ingredient_image_url'] = img_tag['src']
+                                                    ingredient_image_found = True
+                                                    break
+                        if ingredient_image_found:
                             break
+        
+        # Generic approach - track all potential ingredient images
+        if not ingredient_image_found:
+            potential_ingredient_images = []
+            
+            # Method 1: Look for images with ingredient-related alt text
+            all_images = soup.find_all('img')
+            for img in all_images:
+                alt_text = img.get('alt', '').lower()
+                src = img.get('src', '').lower()
+                
+                # Skip tiny images that couldn't contain readable ingredients
+                width = img.get('width', '0')
+                height = img.get('height', '0')
+                try:
+                    if (width and int(width) < 200) or (height and int(height) < 200):
+                        continue
+                except:
+                    pass
+                
+                # Check if any ingredient keyword is in alt text or image URL
+                if any(keyword in alt_text for keyword in ingredient_img_keywords) or \
+                   any(keyword in src for keyword in ingredient_img_keywords):
+                    image_url = img.get('src', '')
+                    if image_url:
+                        # Handle relative URLs
+                        if image_url.startswith('/'):
+                            image_url = f"{domain}{image_url}"
+                        # Handle protocol-relative URLs
+                        elif image_url.startswith('//'):
+                            image_url = f"https:{image_url}"
+                        
+                        score = 0
+                        # Score the image based on keywords in alt text and URL
+                        for keyword in ingredient_img_keywords:
+                            if keyword in alt_text:
+                                score += 2
+                            if keyword in src:
+                                score += 1
+                        
+                        potential_ingredient_images.append((image_url, score))
+            
+            # Method 2: Look for images near ingredient-related headers or sections
+            for identifier in ['Ingredients', 'Supplement Facts', 'Nutrition Facts']:
+                headers = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'dt', 'strong'], 
+                                      string=lambda s: s and identifier.lower() in s.lower())
+                
+                for header in headers:
+                    # Look for images after or before the header
+                    img_after = header.find_next('img')
+                    img_before = header.find_previous('img')
+                    
+                    if img_after:
+                        image_url = img_after.get('src', '')
+                        if image_url:
+                            # Handle relative URLs
+                            if image_url.startswith('/'):
+                                image_url = f"{domain}{image_url}"
+                            # Handle protocol-relative URLs
+                            elif image_url.startswith('//'):
+                                image_url = f"https:{image_url}"
+                            
+                            potential_ingredient_images.append((image_url, 3))  # Higher score for images near headers
+                    
+                    if img_before:
+                        image_url = img_before.get('src', '')
+                        if image_url:
+                            # Handle relative URLs
+                            if image_url.startswith('/'):
+                                image_url = f"{domain}{image_url}"
+                            # Handle protocol-relative URLs
+                            elif image_url.startswith('//'):
+                                image_url = f"https:{image_url}"
+                            
+                            potential_ingredient_images.append((image_url, 2))
+            
+            # Sort by score and select the highest scoring image
+            if potential_ingredient_images:
+                potential_ingredient_images.sort(key=lambda x: x[1], reverse=True)
+                best_ingredient_image = potential_ingredient_images[0][0]
+                product_data['ingredient_image_url'] = best_ingredient_image
+                logging.info(f"Found potential ingredient image: {best_ingredient_image}")
+                ingredient_image_found = True
+        
+        #---------------------------------------------------------------------------
+        # 5. ADDITIONAL INFORMATION (directions, warnings, etc.)
+        #---------------------------------------------------------------------------
+        
+        # Add code for other product details like directions, warnings, etc.
+        # This would follow a similar pattern to the ingredients extraction above
         
         # Try to categorize the supplement based on extracted ingredients
         if product_data['ingredients']:
