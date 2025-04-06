@@ -6,13 +6,14 @@ import time
 import matplotlib.pyplot as plt
 import seaborn as sns
 from PIL import Image
-from io import BytesIO
+from io import BytesIO, StringIO
 import re
 import hashlib
 import base64
 import json
 from datetime import datetime
 import uuid
+import csv
 
 # Import our supplement data collection module
 from supplement_collector import (
@@ -22,7 +23,7 @@ from supplement_collector import (
     categorize_supplement,
     calculate_scores,
     ingredient_category_map,
-    scrape_product_from_url  # New function for direct URL scraping
+    scrape_product_from_url
 )
 
 # Configure page settings
@@ -58,6 +59,9 @@ if 'images_dir' not in st.session_state:
     IMAGES_DIR = "supplement_images"
     os.makedirs(IMAGES_DIR, exist_ok=True)
     st.session_state.images_dir = IMAGES_DIR
+
+if 'batch_results' not in st.session_state:
+    st.session_state.batch_results = []
 
 # Display image function
 def display_image(image_path=None, image_url=None):
@@ -149,9 +153,146 @@ def add_supplement(product_data):
     st.success(f"Added {product_data.get('product_name', 'New Supplement')} to your database!")
     return product_id
 
+# Function to parse URL batch file
+def parse_url_file(file):
+    urls = []
+    
+    # Determine file format
+    if file.name.endswith('.csv'):
+        df = pd.read_csv(file)
+        
+        # Try to find URL column
+        url_column = None
+        for col in df.columns:
+            if 'url' in col.lower() or 'link' in col.lower():
+                url_column = col
+                break
+        
+        if url_column:
+            urls = df[url_column].tolist()
+        else:
+            # If no obvious URL column, take the first column
+            urls = df.iloc[:, 0].tolist()
+    
+    elif file.name.endswith('.txt'):
+        content = file.getvalue().decode('utf-8')
+        urls = [line.strip() for line in content.split('\n') if line.strip()]
+    
+    # Filter out non-URL entries
+    valid_urls = []
+    for url in urls:
+        if isinstance(url, str) and (url.startswith('http://') or url.startswith('https://')):
+            valid_urls.append(url)
+    
+    return valid_urls
+
+# Function to extract brand and product name from URL
+def extract_info_from_url(url):
+    try:
+        # Remove http://, https://, and www.
+        clean_url = re.sub(r'^https?://(www\.)?', '', url)
+        
+        # Split by domain and path
+        parts = clean_url.split('/', 1)
+        domain = parts[0]
+        
+        # Extract brand from domain
+        brand_match = re.search(r'^(?:www\.)?([^.]+)', domain)
+        brand = brand_match.group(1).replace('-', ' ').title() if brand_match else "Unknown Brand"
+        
+        # Try to extract product name from path
+        product_name = "Unknown Product"
+        if len(parts) > 1:
+            path = parts[1]
+            
+            # Look for common product URL patterns
+            # Pattern 1: words separated by hyphens or underscores
+            product_match = re.search(r'[\w-]+/([\w-]+)/?$', path)
+            if product_match:
+                product_name = product_match.group(1).replace('-', ' ').replace('_', ' ').title()
+            
+            # If product_name still looks like a slug or is too short, try different approach
+            if len(product_name.split()) < 2 or len(product_name) < 10:
+                # Try looking for a longer segment
+                segments = path.split('/')
+                for segment in segments:
+                    if len(segment) > len(product_name) and '-' in segment:
+                        product_name = segment.replace('-', ' ').replace('_', ' ').title()
+        
+        return brand, product_name
+    except:
+        return "Unknown Brand", "Unknown Product"
+
+# Function to batch scrape URLs
+def batch_scrape_urls(urls, auto_add=False, progress_bar=None):
+    results = []
+    total_urls = len(urls)
+    
+    for i, url in enumerate(urls):
+        try:
+            # Extract brand and product name from URL
+            brand, product_name = extract_info_from_url(url)
+            
+            # Update progress
+            if progress_bar:
+                progress_bar.progress((i + 1) / total_urls)
+            
+            # Scrape the URL
+            product_data = scrape_product_from_url(brand, product_name, url)
+            
+            # Generate a pseudo-barcode if not provided
+            if not product_data.get('barcode'):
+                product_data['barcode'] = f"GEN{int(time.time()) + i}"
+            
+            # Download image if URL exists
+            if product_data.get('image_url'):
+                local_path = download_image(
+                    product_data['image_url'],
+                    product_data['barcode'],
+                    product_data.get('brand', ''),
+                    product_data.get('product_name', '')
+                )
+                if local_path:
+                    product_data['local_image_path'] = local_path
+            
+            # Calculate scores
+            scores = calculate_scores(product_data)
+            product_data.update(scores)
+            
+            # Add to database if auto_add is enabled
+            if auto_add:
+                add_supplement(product_data)
+                results.append({
+                    'url': url,
+                    'status': 'Success - Added to database',
+                    'brand': product_data.get('brand', ''),
+                    'product_name': product_data.get('product_name', ''),
+                    'overall_score': product_data.get('overall_score', 0)
+                })
+            else:
+                results.append({
+                    'url': url,
+                    'status': 'Success',
+                    'brand': product_data.get('brand', ''),
+                    'product_name': product_data.get('product_name', ''),
+                    'product_data': product_data,
+                    'overall_score': product_data.get('overall_score', 0)
+                })
+                
+        except Exception as e:
+            results.append({
+                'url': url,
+                'status': f'Error: {str(e)}',
+                'brand': '',
+                'product_name': '',
+                'overall_score': 0
+            })
+    
+    return results
+
 # Sidebar navigation
 st.sidebar.title("Navigation")
-page = st.sidebar.radio("Go to", ["Search & Add", "View Database", "Export Data", "Settings"])
+page = st.sidebar.radio("Go to", ["Search & Add", "Batch Processing", "View Database", "Export Data", "Settings"])
 
 if page == "Search & Add":
     st.header("Search & Add Supplements")
@@ -452,6 +593,137 @@ if page == "Search & Add":
                                             href = f'<a href="data:image/jpeg;base64,{b64}" download="{os.path.basename(merged_data["local_image_path"])}">Download Product Image</a>'
                                             st.markdown(href, unsafe_allow_html=True)
 
+elif page == "Batch Processing":
+    st.header("Batch URL Processing")
+    
+    st.markdown("""
+    This page allows you to upload a file containing multiple URLs and process them all at once.
+    You can upload either:
+    - A CSV file with a column containing URLs
+    - A TXT file with one URL per line
+    """)
+    
+    # File uploader
+    uploaded_file = st.file_uploader("Upload URL List", type=["csv", "txt"])
+    
+    if uploaded_file is not None:
+        # Parse the uploaded file
+        urls = parse_url_file(uploaded_file)
+        
+        st.write(f"Found {len(urls)} valid URLs in the uploaded file.")
+        
+        # Show a preview of the URLs
+        if urls:
+            with st.expander("Preview URLs"):
+                for i, url in enumerate(urls[:10]):
+                    st.write(f"{i+1}. {url}")
+                if len(urls) > 10:
+                    st.write(f"... and {len(urls) - 10} more")
+            
+            # Batch processing options
+            st.subheader("Processing Options")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                auto_add = st.checkbox("Automatically add to database", value=True, 
+                                      help="When enabled, all successfully scraped supplements will be automatically added to the database")
+            
+            with col2:
+                delay = st.number_input("Delay between requests (seconds)", 
+                                       min_value=0.0, max_value=10.0, value=1.0, step=0.5,
+                                       help="Add a delay between requests to avoid overloading the server")
+            
+            # Process button
+            if st.button("Process All URLs"):
+                # Create a progress bar
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                
+                # Process the URLs in batches
+                with st.spinner("Scraping URLs..."):
+                    status_text.text("Starting batch processing...")
+                    
+                    # Batch process all URLs
+                    results = batch_scrape_urls(urls, auto_add=auto_add, progress_bar=progress_bar)
+                    st.session_state.batch_results = results
+                    
+                    # Show summary
+                    status_text.text(f"Completed processing {len(urls)} URLs.")
+                
+                # Show results summary
+                success_count = sum(1 for r in results if 'Success' in r['status'])
+                error_count = len(results) - success_count
+                
+                st.subheader("Processing Results")
+                st.write(f"Successfully processed: {success_count} URLs")
+                st.write(f"Failed to process: {error_count} URLs")
+                
+                # Display results in a table
+                result_df = pd.DataFrame([
+                    {
+                        'URL': r['url'],
+                        'Status': r['status'],
+                        'Brand': r['brand'],
+                        'Product': r['product_name'],
+                        'Score': r['overall_score']
+                    } for r in results
+                ])
+                
+                st.dataframe(result_df)
+                
+                # Option to download results as CSV
+                csv = result_df.to_csv(index=False)
+                b64 = base64.b64encode(csv.encode()).decode()
+                href = f'<a href="data:file/csv;base64,{b64}" download="batch_processing_results.csv">Download Results as CSV</a>'
+                st.markdown(href, unsafe_allow_html=True)
+                
+                # If not auto-adding, show interface to review and add manually
+                if not auto_add and success_count > 0:
+                    st.subheader("Review and Add to Database")
+                    st.write("The following supplements were successfully scraped but not added to the database. Select the ones you want to add:")
+                    
+                    # Create a list of success items with product data
+                    success_items = [r for r in results if 'Success' in r['status'] and 'product_data' in r]
+                    
+                    # Create multiselect for choosing which to add
+                    selected_indices = st.multiselect(
+                        "Select supplements to add",
+                        options=list(range(len(success_items))),
+                        format_func=lambda i: f"{success_items[i]['brand']} - {success_items[i]['product_name']}"
+                    )
+                    
+                    if selected_indices and st.button("Add Selected to Database"):
+                        for i in selected_indices:
+                            add_supplement(success_items[i]['product_data'])
+                        
+                        st.success(f"Added {len(selected_indices)} supplements to database")
+        else:
+            st.error("No valid URLs found in the uploaded file. Please make sure your file contains URLs starting with http:// or https://")
+    
+    # Example template
+    st.subheader("Download Template")
+    st.write("Download a template file to see the expected format:")
+    
+    # Generate example CSV
+    example_urls = [
+        "https://www.nowfoods.com/products/double-strength-l-theanine-200-mg",
+        "https://www.jarrow.com/products/ashwagandha-300-mg",
+        "https://www.naturemade.com/products/vitamin-d3-2000-iu",
+        "https://www.gardenoflife.com/products/raw-probiotics-ultimate-care-100-billion"
+    ]
+    
+    example_df = pd.DataFrame({"product_url": example_urls})
+    csv = example_df.to_csv(index=False)
+    b64 = base64.b64encode(csv.encode()).decode()
+    href = f'<a href="data:file/csv;base64,{b64}" download="example_urls.csv">Download Example CSV</a>'
+    st.markdown(href, unsafe_allow_html=True)
+    
+    # Generate example TXT
+    txt = "\n".join(example_urls)
+    b64 = base64.b64encode(txt.encode()).decode()
+    href = f'<a href="data:file/txt;base64,{b64}" download="example_urls.txt">Download Example TXT</a>'
+    st.markdown(href, unsafe_allow_html=True)
+
 elif page == "View Database":
     st.header("View Supplement Database")
     
@@ -688,6 +960,11 @@ elif page == "Settings":
         st.text_input("Google API Key (for image search)")
         st.checkbox("Enable Web Scraping", value=True)
         st.multiselect("Retailer Sources for Scraping", ["Amazon", "iHerb", "Walmart", "GNC", "Vitamin Shoppe"])
+    
+    with st.expander("Batch Processing Settings"):
+        st.number_input("Default Delay Between Requests (seconds)", min_value=0.0, max_value=5.0, value=1.0, step=0.1)
+        st.checkbox("Skip Failed URLs in Batch Processing", value=True)
+        st.number_input("Maximum URLs to Process in One Batch", min_value=1, max_value=1000, value=100)
 
 # Place a progress bar at the bottom to show database size
 st.sidebar.markdown("---")
