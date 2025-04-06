@@ -223,8 +223,19 @@ def extract_info_from_url(url):
     except:
         return "Unknown Brand", "Unknown Product"
 
-# Function to batch scrape URLs
+# Updated function to batch scrape URLs with focus on ingredients and images
 def batch_scrape_urls(urls, auto_add=False, progress_bar=None):
+    """
+    Batch scrape multiple URLs with focus on ingredients and images
+    
+    Parameters:
+    - urls (list): List of URLs to scrape
+    - auto_add (bool): Whether to automatically add to database
+    - progress_bar: Streamlit progress bar object
+    
+    Returns:
+    - list: Results for each URL
+    """
     results = []
     total_urls = len(urls)
     
@@ -237,46 +248,60 @@ def batch_scrape_urls(urls, auto_add=False, progress_bar=None):
             if progress_bar:
                 progress_bar.progress((i + 1) / total_urls)
             
-            # Scrape the URL
+            # Scrape the URL with enhanced scraper
             product_data = scrape_product_from_url(brand, product_name, url)
             
             # Generate a pseudo-barcode if not provided
             if not product_data.get('barcode'):
                 product_data['barcode'] = f"GEN{int(time.time()) + i}"
             
-            # Download image if URL exists
-            if product_data.get('image_url'):
-                local_path = download_image(
-                    product_data['image_url'],
-                    product_data['barcode'],
-                    product_data.get('brand', ''),
-                    product_data.get('product_name', '')
-                )
-                if local_path:
-                    product_data['local_image_path'] = local_path
+            # Download both main product image and ingredient image
+            product_data = download_product_images(product_data)
             
-            # Calculate scores
-            scores = calculate_scores(product_data)
-            product_data.update(scores)
+            # Track if we found ingredients (either in text or image)
+            has_ingredients = (
+                (product_data.get('ingredients') and len(product_data.get('ingredients', '')) > 10) or
+                product_data.get('local_ingredient_image_path')
+            )
+            
+            # Calculate scores if we have ingredients
+            if has_ingredients:
+                scores = calculate_scores(product_data)
+                product_data.update(scores)
             
             # Add to database if auto_add is enabled
             if auto_add:
-                add_supplement(product_data)
-                results.append({
-                    'url': url,
-                    'status': 'Success - Added to database',
-                    'brand': product_data.get('brand', ''),
-                    'product_name': product_data.get('product_name', ''),
-                    'overall_score': product_data.get('overall_score', 0)
-                })
+                if has_ingredients:
+                    add_supplement(product_data)
+                    results.append({
+                        'url': url,
+                        'status': 'Success - Added to database',
+                        'brand': product_data.get('brand', ''),
+                        'product_name': product_data.get('product_name', ''),
+                        'has_text_ingredients': bool(product_data.get('ingredients')),
+                        'has_ingredient_image': bool(product_data.get('local_ingredient_image_path')),
+                        'overall_score': product_data.get('overall_score', 0)
+                    })
+                else:
+                    results.append({
+                        'url': url,
+                        'status': 'Warning - No ingredients found (not added)',
+                        'brand': product_data.get('brand', ''),
+                        'product_name': product_data.get('product_name', ''),
+                        'has_text_ingredients': False,
+                        'has_ingredient_image': False,
+                        'overall_score': 0
+                    })
             else:
                 results.append({
                     'url': url,
-                    'status': 'Success',
+                    'status': 'Success' if has_ingredients else 'Warning - No ingredients found',
                     'brand': product_data.get('brand', ''),
                     'product_name': product_data.get('product_name', ''),
+                    'has_text_ingredients': bool(product_data.get('ingredients')),
+                    'has_ingredient_image': bool(product_data.get('local_ingredient_image_path')),
                     'product_data': product_data,
-                    'overall_score': product_data.get('overall_score', 0)
+                    'overall_score': product_data.get('overall_score', 0) if has_ingredients else 0
                 })
                 
         except Exception as e:
@@ -285,6 +310,8 @@ def batch_scrape_urls(urls, auto_add=False, progress_bar=None):
                 'status': f'Error: {str(e)}',
                 'brand': '',
                 'product_name': '',
+                'has_text_ingredients': False,
+                'has_ingredient_image': False,
                 'overall_score': 0
             })
     
