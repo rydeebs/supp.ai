@@ -208,7 +208,57 @@ def fetch_from_off(barcode):
     return None
 
 # Function to download and save product image
-def download_image(url, barcode, brand, product_name):
+# Updated function to download both product and ingredient images
+def download_product_images(product_data):
+    """
+    Download both main product image and ingredient image
+    
+    Parameters:
+    - product_data (dict): Product data containing image URLs
+    
+    Returns:
+    - dict: Updated product data with local image paths
+    """
+    updated_data = product_data.copy()
+    
+    # 1. Download main product image
+    if product_data.get('image_url'):
+        barcode = product_data.get('barcode', 'nobarcode')
+        brand = product_data.get('brand', '')
+        product_name = product_data.get('product_name', '')
+        
+        local_path = download_image(
+            product_data['image_url'],
+            barcode,
+            brand,
+            product_name,
+            is_ingredient=False
+        )
+        
+        if local_path:
+            updated_data['local_image_path'] = local_path
+    
+    # 2. Download ingredient image (if available)
+    if product_data.get('ingredient_image_url'):
+        barcode = product_data.get('barcode', 'nobarcode')
+        brand = product_data.get('brand', '')
+        product_name = product_data.get('product_name', '')
+        
+        local_path = download_image(
+            product_data['ingredient_image_url'],
+            barcode,
+            brand,
+            product_name,
+            is_ingredient=True
+        )
+        
+        if local_path:
+            updated_data['local_ingredient_image_path'] = local_path
+    
+    return updated_data
+
+# Updated function to download and save a single image
+def download_image(url, barcode, brand, product_name, is_ingredient=False):
     """
     Download and save supplement image
     
@@ -217,6 +267,7 @@ def download_image(url, barcode, brand, product_name):
     - barcode (str): Product barcode
     - brand (str): Product brand
     - product_name (str): Product name
+    - is_ingredient (bool): Whether this is an ingredient image
     
     Returns:
     - str or None: Local filepath if successful, None otherwise
@@ -229,7 +280,13 @@ def download_image(url, barcode, brand, product_name):
         # Create a filename based on product info
         safe_brand = re.sub(r'[^\w\s-]', '', brand).strip().replace(' ', '_')
         safe_product = re.sub(r'[^\w\s-]', '', product_name).strip().replace(' ', '_')
-        filename = f"{barcode}_{safe_brand}_{safe_product}.jpg"
+        
+        # Add suffix for ingredient images
+        if is_ingredient:
+            filename = f"{barcode}_{safe_brand}_{safe_product}_ingredients.jpg"
+        else:
+            filename = f"{barcode}_{safe_brand}_{safe_product}.jpg"
+            
         filepath = os.path.join(IMAGES_DIR, filename)
         
         logging.info(f"Downloading image from {url}")
@@ -492,10 +549,10 @@ def categorize_supplement(ingredients_text):
     logging.info(f"Categorized as {best_category} > {best_subcategory}")
     return best_category, best_subcategory
 
-# Function to scrape supplement data from a specific product URL
+# Enhanced function to scrape product data with focus on images and ingredients
 def scrape_product_from_url(brand_name, product_name, product_url):
     """
-    Scrape supplement data directly from a product webpage
+    Scrape supplement data directly from a product webpage with focus on ingredients and images
     
     Parameters:
     - brand_name (str): Brand name of the supplement
@@ -503,7 +560,7 @@ def scrape_product_from_url(brand_name, product_name, product_url):
     - product_url (str): Direct URL to the product page on the brand's website
     
     Returns:
-    - dict: Product data including image URL and ingredients
+    - dict: Product data including image URLs and ingredients
     """
     logging.info(f"Scraping data for {brand_name} {product_name} from {product_url}")
     
@@ -518,6 +575,7 @@ def scrape_product_from_url(brand_name, product_name, product_url):
         'website': product_url,
         'image_url': '',
         'ingredients': '',
+        'ingredient_image_url': '',  # New field for ingredient label image
         'directions': '',
         'warnings': '',
         'serving_size': '',
@@ -557,7 +615,9 @@ def scrape_product_from_url(brand_name, product_name, product_url):
         # Extract domain for relative URL resolution
         domain = extract_domain(product_url)
         
-        # 1. Find product image
+        #---------------------------------------------------------------------------
+        # 1. FIND MAIN PRODUCT IMAGE
+        #---------------------------------------------------------------------------
         # Check common image selectors
         image_selectors = [
             # Common product image selectors
@@ -621,7 +681,9 @@ def scrape_product_from_url(brand_name, product_name, product_url):
                 logging.info(f"Found product image: {image_url}")
                 product_data['image_url'] = image_url
         
-        # 2. Find ingredients
+        #---------------------------------------------------------------------------
+        # 2. FIND INGREDIENTS IN TEXT
+        #---------------------------------------------------------------------------
         # Look for common ingredient section identifiers
         ingredient_identifiers = [
             # Headers and section titles
@@ -632,6 +694,10 @@ def scrape_product_from_url(brand_name, product_name, product_url):
             'data-tab="ingredients"', 'data-section="ingredients"',
             # Labels
             'Ingredients:', 'Active Ingredients:', 'Contains:',
+            # More specific variations
+            'Other Ingredients', 'Inactive Ingredients',
+            'Supplement Facts', 'Nutrition Facts',
+            'Medicinal Ingredients', 'Non-Medicinal Ingredients'
         ]
         
         ingredients_text = ''
@@ -647,10 +713,10 @@ def scrape_product_from_url(brand_name, product_name, product_url):
                 ingredient_section = header.find_next(['p', 'div', 'span', 'ul', 'li'])
                 if ingredient_section:
                     ingredients_text = ingredient_section.get_text(strip=True)
-                    if ingredients_text:
+                    if ingredients_text and len(ingredients_text) > 10:
                         break
             
-            if ingredients_text:
+            if ingredients_text and len(ingredients_text) > 10:
                 break
                 
             # Try to find divs with matching IDs or classes
@@ -662,10 +728,11 @@ def scrape_product_from_url(brand_name, product_name, product_url):
                 sections = soup.find_all(attrs={attr_name: attr_value})
                 if sections:
                     ingredients_text = sections[0].get_text(strip=True)
-                    break
+                    if ingredients_text and len(ingredients_text) > 10:
+                        break
         
         # Method 2: If no dedicated section found, look for paragraphs containing ingredient keywords
-        if not ingredients_text:
+        if not ingredients_text or len(ingredients_text) < 10:
             ingredient_keywords = ['ingredient', 'contains', 'formulation', 'composition']
             paragraphs = soup.find_all(['p', 'div', 'span', 'li'])
             
@@ -673,13 +740,118 @@ def scrape_product_from_url(brand_name, product_name, product_url):
                 text = p.get_text(strip=True).lower()
                 if any(keyword in text for keyword in ingredient_keywords) and len(text) > 30:
                     ingredients_text = p.get_text(strip=True)
-                    break
+                    if ingredients_text and len(ingredients_text) > 10:
+                        break
         
-        if ingredients_text:
-            logging.info(f"Found ingredients: {ingredients_text[:100]}...")
+        # Method 3: Try to find tables that might contain ingredients
+        if not ingredients_text or len(ingredients_text) < 10:
+            tables = soup.find_all('table')
+            for table in tables:
+                table_text = table.get_text().lower()
+                if 'ingredient' in table_text or 'supplement facts' in table_text:
+                    ingredients_text = table.get_text(strip=True)
+                    if ingredients_text and len(ingredients_text) > 10:
+                        break
+        
+        if ingredients_text and len(ingredients_text) > 10:
+            logging.info(f"Found ingredients in text: {ingredients_text[:100]}...")
             product_data['ingredients'] = ingredients_text
         
-        # 3. Look for directions/usage instructions
+        #---------------------------------------------------------------------------
+        # 3. FIND INGREDIENT IMAGES (if text ingredients not found or as backup)
+        #---------------------------------------------------------------------------
+        # Look for images that might contain ingredient lists
+        ingredient_img_keywords = [
+            'ingredients', 'supplement facts', 'nutrition facts', 'label', 
+            'facts', 'nutritional', 'nutrition information'
+        ]
+        
+        # Track all potential ingredient images
+        potential_ingredient_images = []
+        
+        # Method 1: Look for images with ingredient-related alt text
+        all_images = soup.find_all('img')
+        for img in all_images:
+            alt_text = img.get('alt', '').lower()
+            src = img.get('src', '').lower()
+            
+            # Skip tiny images that couldn't contain readable ingredients
+            width = img.get('width', '0')
+            height = img.get('height', '0')
+            try:
+                if (width and int(width) < 200) or (height and int(height) < 200):
+                    continue
+            except:
+                pass
+            
+            # Check if any ingredient keyword is in alt text or image URL
+            if any(keyword in alt_text for keyword in ingredient_img_keywords) or \
+               any(keyword in src for keyword in ingredient_img_keywords):
+                image_url = img.get('src', '')
+                if image_url:
+                    # Handle relative URLs
+                    if image_url.startswith('/'):
+                        image_url = f"{domain}{image_url}"
+                    # Handle protocol-relative URLs
+                    elif image_url.startswith('//'):
+                        image_url = f"https:{image_url}"
+                    
+                    score = 0
+                    # Score the image based on keywords in alt text and URL
+                    for keyword in ingredient_img_keywords:
+                        if keyword in alt_text:
+                            score += 2
+                        if keyword in src:
+                            score += 1
+                    
+                    potential_ingredient_images.append((image_url, score))
+        
+        # Method 2: Look for images near ingredient-related headers or sections
+        for identifier in ingredient_identifiers:
+            headers = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'dt', 'strong'], 
+                                  string=lambda s: s and identifier.lower() in s.lower())
+            
+            for header in headers:
+                # Look for images after or before the header
+                img_after = header.find_next('img')
+                img_before = header.find_previous('img')
+                
+                if img_after:
+                    image_url = img_after.get('src', '')
+                    if image_url:
+                        # Handle relative URLs
+                        if image_url.startswith('/'):
+                            image_url = f"{domain}{image_url}"
+                        # Handle protocol-relative URLs
+                        elif image_url.startswith('//'):
+                            image_url = f"https:{image_url}"
+                        
+                        potential_ingredient_images.append((image_url, 3))  # Higher score for images near headers
+                
+                if img_before:
+                    image_url = img_before.get('src', '')
+                    if image_url:
+                        # Handle relative URLs
+                        if image_url.startswith('/'):
+                            image_url = f"{domain}{image_url}"
+                        # Handle protocol-relative URLs
+                        elif image_url.startswith('//'):
+                            image_url = f"https:{image_url}"
+                        
+                        potential_ingredient_images.append((image_url, 2))
+        
+        # Sort by score and select the highest scoring image
+        if potential_ingredient_images:
+            potential_ingredient_images.sort(key=lambda x: x[1], reverse=True)
+            best_ingredient_image = potential_ingredient_images[0][0]
+            product_data['ingredient_image_url'] = best_ingredient_image
+            logging.info(f"Found potential ingredient image: {best_ingredient_image}")
+        
+        #---------------------------------------------------------------------------
+        # 4. OTHER INFORMATION (Directions, warnings, etc.)
+        #---------------------------------------------------------------------------
+        
+        # Look for directions/usage instructions
         direction_identifiers = [
             'Directions', 'Suggested Use', 'How to Use', 'Usage', 'Dosage', 
             'Directions for use', 'Recommended Usage', 'Recommendations'
@@ -713,7 +885,7 @@ def scrape_product_from_url(brand_name, product_name, product_url):
                         product_data['directions'] = directions_text
                         break
         
-        # 4. Look for warnings
+        # Look for warnings
         warning_identifiers = [
             'Warning', 'Caution', 'Precaution', 'Safety Information',
             'Warnings', 'Cautions', 'Safety Warnings', 'Important Information'
@@ -747,7 +919,7 @@ def scrape_product_from_url(brand_name, product_name, product_url):
                         product_data['warnings'] = warnings_text
                         break
         
-        # 5. Look for certifications and special properties (gluten-free, vegan, etc.)
+        # Look for certifications and special properties (gluten-free, vegan, etc.)
         cert_keywords = {
             'non-gmo': {'key': 'non_gmo', 'variations': ['non gmo', 'non-gmo', 'not gmo', 'gmo free']},
             'organic': {'key': 'organic', 'variations': ['organic', 'certified organic', 'usda organic']},
@@ -778,29 +950,13 @@ def scrape_product_from_url(brand_name, product_name, product_url):
                     product_data[cert_info['key']] = True
                     break
         
-        # Method 3: Look for specific product labeling sections
-        label_identifiers = ['Product Features', 'Labels', 'Certifications', 'Product Information', 'Benefits']
-        for identifier in label_identifiers:
-            headers = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'], 
-                                  string=lambda s: s and identifier.lower() in s.lower())
-            
-            for header in headers:
-                section = header.find_next(['ul', 'div', 'p'])
-                if section:
-                    section_text = section.get_text().lower()
-                    for cert_key, cert_info in cert_keywords.items():
-                        for variation in cert_info['variations']:
-                            if variation in section_text:
-                                found_certs.append(cert_key)
-                                product_data[cert_info['key']] = True
-        
         # Remove duplicates and join for display
         found_certs = list(set(found_certs))
         if found_certs:
             product_data['certifications'] = ', '.join(found_certs)
             logging.info(f"Found certifications: {product_data['certifications']}")
         
-        # 6. Look for serving size
+        # Look for serving size
         serving_identifiers = [
             'Serving Size', 'Dose', 'Dosage', 'Per Serving', 
             'Servings Per Container', 'Serving Information'
@@ -856,72 +1012,6 @@ def scrape_product_from_url(brand_name, product_name, product_url):
                             serving_text = row_text.replace('serving size', '').strip(': ')
                             product_data['serving_size'] = serving_text
                             break
-            
-        # 7. Look for country of origin
-        origin_identifiers = [
-            'Country of Origin', 'Made in', 'Product of', 'Manufactured in',
-            'Origin', 'Sourced from', 'Country'
-        ]
-        
-        origin_text = ''
-        
-        # Check for explicit country of origin statements
-        for identifier in origin_identifiers:
-            headers = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'dt', 'strong', 'span', 'p'], 
-                                   string=lambda s: s and identifier.lower() in s.lower())
-            
-            for header in headers:
-                origin_el = header.find_next(['p', 'div', 'span', 'td'])
-                if origin_el:
-                    origin_text = origin_el.get_text(strip=True)
-                    
-                    # If the origin is part of the header text
-                    if not origin_text or len(origin_text) < 2:
-                        origin_text = header.get_text(strip=True)
-                        
-                    # Extract country
-                    if identifier.lower() in origin_text.lower():
-                        parts = origin_text.lower().split(identifier.lower())
-                        if len(parts) > 1:
-                            origin_text = parts[1].strip(': ')
-                    
-                    # Common countries to check for
-                    countries = ['usa', 'united states', 'canada', 'china', 'india', 'japan', 
-                                'germany', 'uk', 'united kingdom', 'france', 'italy', 'australia']
-                    
-                    for country in countries:
-                        if country in origin_text.lower():
-                            product_data['country_of_origin'] = country.title()
-                            break
-                            
-                    if product_data['country_of_origin']:
-                        break
-            
-            if product_data['country_of_origin']:
-                break
-        
-        # If no country found but "Made in" appears in the page
-        if not product_data['country_of_origin']:
-            all_paragraphs = soup.find_all(['p', 'div', 'span', 'li'])
-            for p in all_paragraphs:
-                text = p.get_text().lower()
-                if 'made in' in text:
-                    # Try to find country after "made in"
-                    after_made_in = text.split('made in')[1].strip()
-                    countries = ['usa', 'united states', 'canada', 'china', 'india', 'japan', 
-                                'germany', 'uk', 'united kingdom', 'france', 'italy', 'australia']
-                    
-                    for country in countries:
-                        if country in after_made_in:
-                            product_data['country_of_origin'] = country.title()
-                            break
-                
-                if product_data['country_of_origin']:
-                    break
-                    
-        # Default to USA if nothing found (common for supplements)
-        if not product_data['country_of_origin']:
-            product_data['country_of_origin'] = 'USA'
         
         # Try to categorize the supplement based on extracted ingredients
         if product_data['ingredients']:
@@ -935,7 +1025,6 @@ def scrape_product_from_url(brand_name, product_name, product_url):
     except Exception as e:
         logging.error(f"Error scraping product from URL: {e}")
         return product_data
-
 # Helper function to extract domain from URL
 def extract_domain(url):
     """Extract domain from URL for resolving relative paths"""
