@@ -21,7 +21,8 @@ from supplement_collector import (
     fetch_supplement_image,
     categorize_supplement,
     calculate_scores,
-    ingredient_category_map
+    ingredient_category_map,
+    scrape_product_from_url  # New function for direct URL scraping
 )
 
 # Configure page settings
@@ -158,7 +159,7 @@ if page == "Search & Add":
     search_col1, search_col2 = st.columns([3, 1])
     
     with search_col1:
-        search_method = st.radio("Search Method", ["Barcode", "Product Name"], horizontal=True)
+        search_method = st.radio("Search Method", ["Barcode", "Product Name", "Direct URL"], horizontal=True)
         
         if search_method == "Barcode":
             barcode = st.text_input("Enter Barcode", value="")
@@ -258,6 +259,198 @@ if page == "Search & Add":
             if st.button("Search") and product_name:
                 st.info("This feature will search for supplements by name across various sources. Not implemented in this demo.")
                 # This would require additional API implementations
+        
+        elif search_method == "Direct URL":
+            with st.form("direct_url_form"):
+                brand = st.text_input("Brand Name", help="Enter the supplement brand name")
+                product_name = st.text_input("Product Name", help="Enter the supplement product name")
+                barcode = st.text_input("Barcode (optional)", help="Enter the product barcode if available")
+                product_url = st.text_input("Product URL", help="Enter the full URL to the product page on the brand's website")
+                
+                submitted = st.form_submit_button("Scrape Product Data")
+                
+                if submitted and product_url:
+                    if not brand or not product_name:
+                        st.error("Brand name and product name are required")
+                    else:
+                        with st.spinner("Scraping product data from URL..."):
+                            # Call the scraper function
+                            product_data = scrape_product_from_url(brand, product_name, product_url)
+                            
+                            # Add barcode if provided
+                            if barcode:
+                                product_data['barcode'] = barcode
+                            
+                            # Download image if URL exists
+                            if product_data.get('image_url'):
+                                local_path = download_image(
+                                    product_data['image_url'],
+                                    barcode if barcode else "nobarcode",
+                                    product_data.get('brand', ''),
+                                    product_data.get('product_name', '')
+                                )
+                                if local_path:
+                                    product_data['local_image_path'] = local_path
+                            
+                            # Display the scraped data
+                            col1, col2 = st.columns([1, 2])
+                            
+                            with col1:
+                                if product_data.get('image_url'):
+                                    image = display_image(image_url=product_data['image_url'])
+                                    if image:
+                                        st.image(image, caption="Product Image", width=250)
+                                    else:
+                                        st.info("Image could not be displayed")
+                                        st.text(product_data['image_url'])
+                                else:
+                                    st.info("No image found on product page")
+                            
+                            with col2:
+                                # Allow editing of product data
+                                edited_data = {}
+                                # Brand and product name are already set
+                                edited_data['brand'] = st.text_input("Brand", value=product_data.get('brand', ''), key="url_brand")
+                                edited_data['product_name'] = st.text_input("Product Name", value=product_data.get('product_name', ''), key="url_product")
+                                
+                                # Category/subcategory selector
+                                categories = {
+                                    "Cognitive & Mental Health": ["Nootropics", "Memory & Focus", "Mood Support", "Stress & Anxiety Relief"],
+                                    "Fitness & Performance": ["Pre-Workout", "Post-Workout / Recovery", "Muscle Building", "Endurance & Energy"],
+                                    "Joint & Bone Health": ["Joint Support", "Bone Strength"],
+                                    "Heart & Circulatory Health": ["Cholesterol Support", "Blood Pressure Support", "Circulation Enhancers"],
+                                    "Immune Support": ["General Immune Boosters", "Antivirals", "Adaptogens"],
+                                    "Cellular Health & Longevity": ["Antioxidants", "Mitochondrial Support", "Telomere/Anti-aging"],
+                                    "Hormonal Support": ["Testosterone Boosters", "Estrogen Balance", "Thyroid Support", "Menopause & PMS"],
+                                    "Digestive Health": ["Probiotics", "Prebiotics", "Digestive Enzymes", "Gut Lining Support"],
+                                    "Vitamins & Minerals": ["Multivitamins", "Individual Vitamins", "Individual Minerals"],
+                                    "Greens & Superfoods": ["Greens Powders", "Algae & Sea Vegetables", "Reds/Berries Powders"],
+                                    "Sleep & Relaxation": ["Sleep Aids", "Relaxation Support"],
+                                    "Weight Management": ["Appetite Suppressants", "Fat Burners", "Metabolism Boosters"],
+                                    "Detox & Cleanse": ["Liver Support", "Heavy Metal Detox", "Colon Cleanses"]
+                                }
+                                
+                                edited_data['main_category'] = st.selectbox(
+                                    "Main Category", 
+                                    list(categories.keys()),
+                                    index=list(categories.keys()).index(product_data.get('main_category', 'Vitamins & Minerals')) if product_data.get('main_category') in categories.keys() else 0,
+                                    key="url_category"
+                                )
+                                
+                                edited_data['subcategory'] = st.selectbox(
+                                    "Subcategory", 
+                                    categories[edited_data['main_category']],
+                                    index=categories[edited_data['main_category']].index(product_data.get('subcategory', categories[edited_data['main_category']][0])) if product_data.get('subcategory') in categories[edited_data['main_category']] else 0,
+                                    key="url_subcategory"
+                                )
+                                
+                                # Show scraped ingredients and allow editing
+                                edited_data['ingredients'] = st.text_area("Ingredients", value=product_data.get('ingredients', ''), key="url_ingredients")
+                                
+                                # Display and allow editing of other scraped data
+                                if product_data.get('directions'):
+                                    st.success("✓ Directions successfully scraped")
+                                    edited_data['directions'] = st.text_area("Directions", value=product_data.get('directions', ''), key="url_directions")
+                                else:
+                                    edited_data['directions'] = st.text_area("Directions (not found - add manually)", value="", key="url_directions_manual")
+                                
+                                if product_data.get('warnings'):
+                                    st.success("✓ Warnings successfully scraped")
+                                    edited_data['warnings'] = st.text_area("Warnings", value=product_data.get('warnings', ''), key="url_warnings")
+                                else:
+                                    edited_data['warnings'] = st.text_area("Warnings (not found - add manually)", value="", key="url_warnings_manual")
+                                
+                                if product_data.get('serving_size'):
+                                    st.success("✓ Serving size successfully scraped")
+                                    edited_data['serving_size'] = st.text_input("Serving Size", value=product_data.get('serving_size', ''), key="url_serving")
+                                else:
+                                    edited_data['serving_size'] = st.text_input("Serving Size (not found - add manually)", value="", key="url_serving_manual")
+                                
+                                # Certifications
+                                st.markdown("### Certifications & Claims")
+                                if product_data.get('certifications'):
+                                    st.success(f"✓ Certifications found: {product_data.get('certifications', '')}")
+                                
+                                cert_col1, cert_col2 = st.columns(2)
+                                
+                                with cert_col1:
+                                    edited_data['gmp_certified'] = st.checkbox("GMP Certified", value=product_data.get('gmp_certified', False), key="url_gmp")
+                                    edited_data['third_party_tested'] = st.checkbox("Third-Party Tested", value=product_data.get('third_party_tested', False), key="url_third_party")
+                                    edited_data['allergen_free'] = st.checkbox("Allergen Free", value=product_data.get('allergen_free', False), key="url_allergen")
+                                
+                                with cert_col2:
+                                    edited_data['vegan'] = st.checkbox("Vegan", value=product_data.get('vegan', False), key="url_vegan")
+                                    edited_data['gluten_free'] = st.checkbox("Gluten Free", value=product_data.get('gluten_free', False), key="url_gluten")
+                                    edited_data['non_gmo'] = st.checkbox("Non-GMO", value=product_data.get('non_gmo', False), key="url_nongmo")
+                                    edited_data['organic'] = st.checkbox("Organic", value=product_data.get('organic', False), key="url_organic")
+                                
+                                # Additional information
+                                with st.expander("Additional Information"):
+                                    if product_data.get('country_of_origin'):
+                                        st.success(f"✓ Country of origin detected: {product_data.get('country_of_origin')}")
+                                    
+                                    edited_data['country_of_origin'] = st.text_input(
+                                        "Country of Origin", 
+                                        value=product_data.get('country_of_origin', 'USA'),
+                                        key="url_country"
+                                    )
+                                    
+                                    # Website should already be filled with the provided URL
+                                    edited_data['website'] = product_url
+                                
+                                # Merge the original data with edited data
+                                merged_data = {**product_data, **edited_data}
+                                
+                                # Calculate scores based on the scraped data
+                                with st.spinner("Calculating supplement scores..."):
+                                    scores = calculate_scores(merged_data)
+                                    merged_data.update(scores)
+                                
+                                # Display preliminary scores
+                                st.subheader("Calculated Scores")
+                                score_df = pd.DataFrame({
+                                    'Metric': [
+                                        'Overall Score',
+                                        'Ingredients Quality',
+                                        'Manufacturing Quality',
+                                        'Testing & Verification',
+                                        'Label Accuracy',
+                                        'Nutritional Quality',
+                                        'Sustainability'
+                                    ],
+                                    'Score': [
+                                        scores.get('overall_score', 0),
+                                        scores.get('ingredients_score', 0),
+                                        scores.get('manufacturing_quality_score', 0),
+                                        scores.get('testing_verification_score', 0),
+                                        scores.get('label_accuracy_score', 0),
+                                        scores.get('nutritional_quality_score', 0),
+                                        scores.get('sustainability_score', 0)
+                                    ]
+                                })
+                                
+                                fig, ax = plt.subplots(figsize=(10, 3))
+                                bars = sns.barplot(x='Score', y='Metric', data=score_df, orient='h', palette='viridis')
+                                ax.set_xlim(0, 10)
+                                ax.set_title('Supplement Scores')
+                                st.pyplot(fig)
+                                
+                                # Add button
+                                if st.button("Add to Database", key="url_add_button"):
+                                    if not merged_data.get('barcode'):
+                                        # Generate a pseudo-barcode if not provided
+                                        merged_data['barcode'] = f"GEN{int(time.time())}"
+                                        
+                                    product_id = add_supplement(merged_data)
+                                    st.success(f"Added supplement with ID: {product_id}")
+                                    
+                                    # Display image download link if available
+                                    if merged_data.get('local_image_path') and os.path.exists(merged_data['local_image_path']):
+                                        with open(merged_data['local_image_path'], "rb") as img_file:
+                                            img_bytes = img_file.read()
+                                            b64 = base64.b64encode(img_bytes).decode()
+                                            href = f'<a href="data:image/jpeg;base64,{b64}" download="{os.path.basename(merged_data["local_image_path"])}">Download Product Image</a>'
+                                            st.markdown(href, unsafe_allow_html=True)
 
 elif page == "View Database":
     st.header("View Supplement Database")
@@ -505,4 +698,62 @@ st.sidebar.text(f"{total_supplements} supplements collected")
 
 # Footer
 st.sidebar.markdown("---")
-st.sidebar.info("© 2025 Supplement Scanner App")
+st.sidebar.info("© 2025 Supplement Scanner App")import streamlit as st
+import pandas as pd
+import requests
+import os
+import time
+import matplotlib.pyplot as plt
+import seaborn as sns
+from PIL import Image
+from io import BytesIO
+import re
+import hashlib
+import base64
+import json
+from datetime import datetime
+import uuid
+
+# Import our supplement data collection module
+from supplement_collector import (
+    fetch_from_off,
+    download_image,
+    fetch_supplement_image,
+    categorize_supplement,
+    calculate_scores,
+    ingredient_category_map,
+    scrape_product_from_url  # New function for direct URL scraping
+)
+
+# Configure page settings
+st.set_page_config(
+    page_title="Supplement Data Collector",
+    page_icon="💊",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# App title and description
+st.title("🧪 Supplement Data Collection Dashboard")
+st.markdown("""
+This application helps you collect and organize supplement data for your barcode scanning app.
+You can search for supplements, view their details, categorize them, and export the data to CSV for Firebase.
+""")
+
+# Initialize session state variables
+if 'supplements_df' not in st.session_state:
+    # Create empty DataFrame with our structure
+    st.session_state.supplements_df = pd.DataFrame(columns=[
+        'id', 'barcode', 'brand', 'product_name', 'main_category', 'subcategory',
+        'ingredients', 'manufacturing_quality_score', 'testing_verification_score',
+        'label_accuracy_score', 'nutritional_quality_score', 'certifications',
+        'sustainability_score', 'overall_score', 'gmp_certified', 'third_party_tested',
+        'allergen_free', 'vegan', 'gluten_free', 'non_gmo', 'organic',
+        'country_of_origin', 'manufacture_date', 'serving_size', 'directions',
+        'warnings', 'storage_instructions', 'image_url', 'local_image_path', 'website', 'last_updated'
+    ])
+
+if 'images_dir' not in st.session_state:
+    # Create directory for storing images
+    IMAGES_DIR = "supplement_images"
+    os.makedirs(IMAGES_DIR, exist_ok=True
