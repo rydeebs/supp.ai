@@ -223,8 +223,8 @@ def extract_info_from_url(url):
     except:
         return "Unknown Brand", "Unknown Product"
 
-# Updated function to batch scrape URLs with focus on ingredients and images
-def batch_scrape_urls(urls, auto_add=False, progress_bar=None):
+# Updated function to batch scrape URLs with improved brand/product detection
+def batch_scrape_urls(urls, auto_add=False, progress_bar=None, delay=1.0):
     """
     Batch scrape multiple URLs with focus on ingredients and images
     
@@ -232,6 +232,7 @@ def batch_scrape_urls(urls, auto_add=False, progress_bar=None):
     - urls (list): List of URLs to scrape
     - auto_add (bool): Whether to automatically add to database
     - progress_bar: Streamlit progress bar object
+    - delay (float): Delay between requests in seconds
     
     Returns:
     - list: Results for each URL
@@ -241,15 +242,18 @@ def batch_scrape_urls(urls, auto_add=False, progress_bar=None):
     
     for i, url in enumerate(urls):
         try:
-            # Extract brand and product name from URL
-            brand, product_name = extract_info_from_url(url)
+            # Initially use placeholder values - our improved scraper will extract the real info
+            placeholder_brand = "Unknown Brand"
+            placeholder_product = "Unknown Product"
             
             # Update progress
             if progress_bar:
                 progress_bar.progress((i + 1) / total_urls)
+                status_text = f"Processing URL {i+1} of {total_urls}: {url}"
+                st.text(status_text)
             
             # Scrape the URL with enhanced scraper
-            product_data = scrape_product_from_url(brand, product_name, url)
+            product_data = scrape_product_from_url(placeholder_brand, placeholder_product, url)
             
             # Generate a pseudo-barcode if not provided
             if not product_data.get('barcode'):
@@ -303,8 +307,13 @@ def batch_scrape_urls(urls, auto_add=False, progress_bar=None):
                     'product_data': product_data,
                     'overall_score': product_data.get('overall_score', 0) if has_ingredients else 0
                 })
+            
+            # Add delay between requests to avoid overloading the server
+            if i < total_urls - 1 and delay > 0:
+                time.sleep(delay)
                 
         except Exception as e:
+            logging.error(f"Error processing URL: {url}: {str(e)}")
             results.append({
                 'url': url,
                 'status': f'Error: {str(e)}',
