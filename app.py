@@ -279,7 +279,16 @@ def batch_scrape_urls(urls, auto_add=False, progress_bar=None, delay=1.0):
                 if has_ingredients:
                     add_supplement(product_data)
                     results.append({
-                        'url': url,
+                'url': url,
+                'status': f'Error: {str(e)}',
+                'brand': '',
+                'product_name': '',
+                'has_text_ingredients': False,
+                'has_ingredient_image': False,
+                'overall_score': 0
+            })
+    
+    return results        'url': url,
                         'status': 'Success - Added to database',
                         'brand': product_data.get('brand', ''),
                         'product_name': product_data.get('product_name', ''),
@@ -316,16 +325,6 @@ def batch_scrape_urls(urls, auto_add=False, progress_bar=None, delay=1.0):
         except Exception as e:
             logging.error(f"Error processing URL: {url}: {str(e)}")
             results.append({
-                'url': url,
-                'status': f'Error: {str(e)}',
-                'brand': '',
-                'product_name': '',
-                'has_text_ingredients': False,
-                'has_ingredient_image': False,
-                'overall_score': 0
-            })
-    
-    return results
 
 # Sidebar navigation
 st.sidebar.title("Navigation")
