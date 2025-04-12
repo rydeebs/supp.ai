@@ -1,7 +1,16 @@
-streamlit>=1.22.0
-pandas>=1.3.0
-requests>=2.27.0
-beautifulsoup4>=4.10.0
-Pillow>=9.0.0
-matplotlib>=3.5.0
-seaborn>=0.11.0
+# requirements.txt
+
+# For making HTTP requests
+requests>=2.25.0
+
+# For parsing HTML content
+beautifulsoup4>=4.9.0
+
+# Efficient HTML parser used by BeautifulSoup
+lxml>=4.6.0
+
+# For data manipulation and reading/writing CSV
+pandas>=1.2.0
+
+# For creating the web application interface
+streamlit>=1.10.0
