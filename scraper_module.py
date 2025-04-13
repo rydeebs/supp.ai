@@ -1,14 +1,13 @@
+# scraper_module.py
 import requests
 from bs4 import BeautifulSoup
 import time
-import re # Regular expressions for finding text
+import re
 import logging
 
-# --- Configuration ---
-# Delay to be polite to servers. Increase if getting blocked. Crucial for Amazon/Walmart.
+# --- Configuration (Keep as before) ---
 REQUEST_DELAY_SECONDS = 3
 HEADERS = {
-    # Using a common browser User-Agent can help avoid simple blocks
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
     'Accept-Language': 'en-US,en;q=0.9',
     'Accept-Encoding': 'gzip, deflate, br',
@@ -18,39 +17,34 @@ HEADERS = {
     'Cache-Control': 'max-age=0',
 }
 
-# --- Logging Setup ---
-# Configure logging (optional, but helpful for debugging)
+# --- Logging Setup (Keep as before) ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# --- Helper Functions ---
+# --- Constants ---
+MIN_TEXT_LENGTH = 20 # Minimum characters to consider a result valid
+MAX_PARENT_TEXT_LENGTH = 4000 # Max characters when grabbing parent text to avoid whole page sections
+PARTIAL_INGREDIENTS_NOTE = " [Partial Data Possible - Check Image/Full Description]"
 
+# --- Fetch Function (Keep as before) ---
 def fetch_page(url):
-    """Fetches the HTML content of a given URL."""
     logging.info(f"Attempting to fetch: {url}")
     try:
-        response = requests.get(url, headers=HEADERS, timeout=25) # Increased timeout
-        # Check if the request was successful
+        response = requests.get(url, headers=HEADERS, timeout=25)
         response.raise_for_status()
         logging.info(f"Successfully fetched {url} with status code {response.status_code}")
-        # Check content type to avoid trying to parse non-HTML (like images directly)
         if 'text/html' not in response.headers.get('Content-Type', ''):
             logging.warning(f"Content-Type for {url} is not text/html: {response.headers.get('Content-Type')}")
-            # Depending on your needs, you might return None or the raw content
-            # For this scraper, we primarily want HTML
             return None
         return response.text
+    # ... (rest of exception handling as before) ...
     except requests.exceptions.Timeout:
         logging.error(f"Timeout error fetching {url}")
         return None
     except requests.exceptions.HTTPError as e:
-        logging.error(f"HTTP error fetching {url}: {e.status_code} {e.response.reason}")
-        # Specific handling for common blocking codes
-        if e.response.status_code == 403: # Forbidden
-             logging.error("-> Access Forbidden (403). Likely blocked by anti-scraping measures.")
-        elif e.response.status_code == 404: # Not Found
-             logging.error("-> Page Not Found (404).")
-        elif e.response.status_code == 503: # Service Unavailable
-             logging.error("-> Service Unavailable (503). May be temporary or anti-scraping.")
+        logging.error(f"HTTP error fetching {url}: {e.response.status_code} {e.response.reason}")
+        if e.response.status_code == 403: logging.error("-> Access Forbidden (403). Likely blocked by anti-scraping measures.")
+        elif e.response.status_code == 404: logging.error("-> Page Not Found (404).")
+        elif e.response.status_code == 503: logging.error("-> Service Unavailable (503). May be temporary or anti-scraping.")
         return None
     except requests.exceptions.RequestException as e:
         logging.error(f"General error fetching {url}: {e}")
@@ -59,160 +53,214 @@ def fetch_page(url):
         logging.error(f"An unexpected error occurred during fetch for {url}: {e}")
         return None
 
-def find_text_near_keyword(soup, keywords, tag_types=['p', 'div', 'span', 'li', 'td', 'section', 'article']):
-    """
-    Tries to find text content located near specified keywords within given tag types.
-    Improved logic to check siblings, parents, and specific structures.
-    NOTE: This is a generic approach. Site-specific selectors are usually more reliable.
-    """
-    found_text = [] # Collect potential matches
+
+# --- NEW: Scraping Strategy Helper Functions ---
+
+def find_by_specific_attributes(soup, keyword_variations):
+    """Strategy 1: Look for elements with id/class containing keywords."""
     try:
-        # 1. Find headings (h1-h6) with the keyword and get the *following sibling element's text*
-        for keyword in keywords:
-            headings = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'], string=re.compile(r'\b' + re.escape(keyword) + r'\b', re.IGNORECASE))
-            for heading in headings:
-                content_element = heading.find_next_sibling()
-                while content_element and (not content_element.name or not content_element.get_text(strip=True)): # Skip empty/non-existent tags
-                    content_element = content_element.find_next_sibling()
-
-                if content_element:
-                    text = content_element.get_text(separator=' ', strip=True)
-                    if len(text) > 15: # Basic sanity check
-                        found_text.append(text)
-                        # Often the first good match is enough
-                        # return text # Uncomment if you want to return the first match immediately
-
-        # 2. Find elements containing the keyword directly and check siblings/parents
-        for keyword in keywords:
-            # Use lambda for flexibility - check text within specified tag types
-            elements = soup.find_all(lambda tag: tag.name in tag_types and re.search(r'\b' + re.escape(keyword) + r'\b', tag.get_text(), re.IGNORECASE))
+        for key in keyword_variations:
+            # Regex to find id/class containing the keyword (case-insensitive)
+            # Example: id="ingredients", class="product-ingredients", id="supplementFacts"
+            elements = soup.find_all(lambda tag: tag.has_attr('id') and re.search(key, tag['id'], re.IGNORECASE) or \
+                                                tag.has_attr('class') and any(re.search(key, c, re.IGNORECASE) for c in tag['class']))
             for element in elements:
-                # Option A: Check next sibling
-                sibling = element.find_next_sibling()
-                if sibling and sibling.get_text(strip=True):
-                    text = sibling.get_text(separator=' ', strip=True)
-                    if len(text) > 15 and text not in found_text:
-                        found_text.append(text)
+                text = element.get_text(separator=' ', strip=True)
+                if len(text) >= MIN_TEXT_LENGTH:
+                    logging.info(f"Strategy 1 SUCCESS: Found via attribute matching '{key}'")
+                    return text
+    except Exception as e:
+        logging.warning(f"Error in Strategy 1 (Attributes): {e}")
+    return None
 
-                # Option B: Check parent's text, if it's reasonably sized and contains keyword near start
+def find_by_heading_sibling(soup, keywords):
+    """Strategy 2: Look for heading containing keyword, get next sibling's text."""
+    try:
+        heading_tags = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'strong', 'b']
+        for keyword in keywords:
+            # Find heading tags containing the keyword text
+            headings = soup.find_all(heading_tags, string=re.compile(r'\b' + re.escape(keyword) + r'\b', re.IGNORECASE))
+            for heading in headings:
+                sibling = heading.find_next_sibling()
+                # Find the *first* actual content sibling, skipping empty tags/navigable strings
+                while sibling and (not sibling.name or not sibling.get_text(strip=True)):
+                    sibling = sibling.find_next_sibling()
+
+                if sibling:
+                    text = sibling.get_text(separator=' ', strip=True)
+                    if len(text) >= MIN_TEXT_LENGTH:
+                        logging.info(f"Strategy 2 SUCCESS: Found via heading '{keyword}' + sibling")
+                        return text
+    except Exception as e:
+        logging.warning(f"Error in Strategy 2 (Heading+Sibling): {e}")
+    return None
+
+def find_by_keyword_in_tag(soup, keywords):
+    """Strategy 3: Look for p/div/li starting with the keyword."""
+    try:
+        tags_to_check = ['p', 'div', 'li']
+        for keyword in keywords:
+            # Regex: starts with optional whitespace, keyword, optional colon, whitespace
+            pattern = re.compile(r'^\s*' + re.escape(keyword) + r':?\s+', re.IGNORECASE)
+            elements = soup.find_all(tags_to_check, string=pattern)
+            for element in elements:
+                text = element.get_text(separator=' ', strip=True)
+                if len(text) >= MIN_TEXT_LENGTH:
+                    logging.info(f"Strategy 3 SUCCESS: Found via keyword '{keyword}' inside tag")
+                    # Check if it looks like Olly's "Other Ingredients" case
+                    if "other ingredients" in keyword.lower() and len(text) < 250: # Arbitrary short length check
+                         return text + PARTIAL_INGREDIENTS_NOTE
+                    return text
+    except Exception as e:
+        logging.warning(f"Error in Strategy 3 (KeywordInTag): {e}")
+    return None
+
+def find_by_definition_list(soup, keywords):
+    """Strategy 4: Look for keyword in <dt>, get text from next <dd>."""
+    try:
+        for keyword in keywords:
+            # Find <dt> tags containing the keyword
+            dts = soup.find_all('dt', string=re.compile(r'\b' + re.escape(keyword) + r'\b', re.IGNORECASE))
+            for dt in dts:
+                dd = dt.find_next_sibling('dd')
+                # Sometimes there might be non-DD siblings in between
+                current = dt
+                while not dd and current.find_next_sibling():
+                    current = current.find_next_sibling()
+                    if current.name == 'dd':
+                        dd = current
+                        break # Found it
+
+                if dd:
+                    text = dd.get_text(separator=' ', strip=True)
+                    if len(text) >= MIN_TEXT_LENGTH:
+                        logging.info(f"Strategy 4 SUCCESS: Found via definition list (<dt> '{keyword}')")
+                        return text
+    except Exception as e:
+        logging.warning(f"Error in Strategy 4 (DefinitionList): {e}")
+    return None
+
+def find_by_parent_text(soup, keywords):
+    """Strategy 5 (Fallback): Find element with keyword, get parent's text."""
+    try:
+        tags_to_check = ['p', 'div', 'span', 'li', 'td', 'section', 'article', 'b', 'strong']
+        for keyword in keywords:
+             # Find any element containing the keyword
+            elements = soup.find_all(lambda tag: tag.name in tags_to_check and re.search(r'\b' + re.escape(keyword) + r'\b', tag.get_text(), re.IGNORECASE))
+            for element in elements:
                 parent = element.parent
                 if parent:
                     parent_text = parent.get_text(separator=' ', strip=True)
+                    # Check if keyword is near start and text isn't excessively long
                     kw_pos = parent_text.lower().find(keyword.lower())
-                    # Avoid grabbing huge chunks of unrelated text
-                    if kw_pos != -1 and kw_pos < 200 and len(parent_text) > 20 and len(parent_text) < 5000 and parent_text not in found_text:
-                       found_text.append(parent_text)
-
-                # Option C: The element itself (if it's substantial)
-                element_text = element.get_text(separator=' ', strip=True)
-                if len(element_text) > 20 and element_text not in found_text and keyword.lower() in element_text.lower():
-                     found_text.append(element_text)
-
-
+                    if kw_pos != -1 and kw_pos < 200 and len(parent_text) >= MIN_TEXT_LENGTH and len(parent_text) <= MAX_PARENT_TEXT_LENGTH:
+                        logging.info(f"Strategy 5 SUCCESS: Found via parent text containing '{keyword}'")
+                        return parent_text
     except Exception as e:
-        logging.warning(f"Error during keyword search: {e}")
-
-    # Prioritize longer, more relevant texts if multiple found
-    if not found_text:
-        return None
-
-    # Simple way to choose the longest result, assuming it's most complete
-    # More sophisticated ranking could be added (e.g., based on keyword proximity)
-    found_text.sort(key=len, reverse=True)
-    return found_text[0] # Return the longest match
+        logging.warning(f"Error in Strategy 5 (ParentText): {e}")
+    return None
 
 
-def parse_ingredients(soup):
-    """Attempts to parse ingredients from the BeautifulSoup object."""
-    # Added more keyword variations
-    ingredient_keywords = [
+# --- Main Parsing Functions (Using Strategies) ---
+
+def parse_ingredients(soup, url):
+    """Attempts to parse ingredients using multiple strategies."""
+    logging.debug(f"Attempting to parse ingredients for {url}")
+    # Define variations for attribute searching (Strategy 1)
+    attribute_keywords = ['ingredient', 'supplement', 'nutrition', 'facts']
+    # Define variations for text searching (Strategies 2, 3, 4, 5)
+    text_keywords = [
         'ingredients', 'supplement facts', 'other ingredients',
-        'nutrition facts', 'components', 'composition', 'contains'
-        # Add site-specific terms if needed, e.g., 'What\'s Inside'
+        'nutrition facts', 'components', 'composition', 'contains',
+        'what\'s inside' # Example of adding less common variations
     ]
-    # Site-specific selectors (EXAMPLES - replace with actual selectors found via inspection)
-    # if soup.find('div', class_='ingredient-list-class'):
-    #     return soup.find('div', class_='ingredient-list-class').get_text(separator=' ', strip=True)
-    # if soup.select_one('#ingredients-section-id'):
-    #     return soup.select_one('#ingredients-section-id').get_text(separator=' ', strip=True)
 
-    ingredients = find_text_near_keyword(soup, ingredient_keywords)
+    result = None
 
-    if ingredients:
-        # Basic check: Target URL might only give "Creatine Monohydrate." in text.
-        # This is a very specific check, might need refinement.
-        if "Creatine Monohydrate." in ingredients and len(ingredients) < 50:
-             logging.warning("Found only basic ingredient text, full details might be in an image.")
-        return ingredients
+    # Try strategies in order of expected reliability
+    if not result: result = find_by_specific_attributes(soup, attribute_keywords)
+    if not result: result = find_by_heading_sibling(soup, text_keywords)
+    if not result: result = find_by_keyword_in_tag(soup, text_keywords)
+    if not result: result = find_by_definition_list(soup, text_keywords)
+    if not result: result = find_by_parent_text(soup, text_keywords) # Last resort
+
+    if result:
+        # Basic cleanup: remove excessive whitespace/newlines
+        result = re.sub(r'\s{2,}', ' ', result).strip()
+        return result
     else:
-        logging.warning("Could not find ingredients using keyword search.")
-        # Add a fallback for Target's specific structure if needed
-        target_details = soup.find('h3', string=re.compile("Ingredients", re.IGNORECASE))
-        if target_details and target_details.find_next_sibling('div'):
-             ing_text = target_details.find_next_sibling('div').get_text(separator=' ', strip=True)
-             if ing_text:
-                 logging.info("Found potential ingredients in Target specific structure.")
-                 return ing_text
-
-    return "Ingredients not found (check HTML structure or image)"
+        logging.warning(f"All strategies FAILED for ingredients on {url}")
+        return "Ingredients not found (check HTML structure or image)"
 
 
-def parse_directions(soup):
-    """Attempts to parse directions from the BeautifulSoup object."""
-    direction_keywords = [
+def parse_directions(soup, url):
+    """Attempts to parse directions using multiple strategies."""
+    logging.debug(f"Attempting to parse directions for {url}")
+    attribute_keywords = ['direction', 'usage', 'instruction', 'how-to', 'serving']
+    text_keywords = [
         'directions', 'suggested use', 'how to use', 'usage',
-        'recommended dose', 'instructions', 'serving suggestion'
+        'recommended dose', 'instructions', 'serving suggestion',
+        'how to take', 'suggested dosage'
     ]
-    # Site-specific selectors (EXAMPLES)
-    # if soup.find('div', id='directions-for-use'):
-    #     return soup.find('div', id='directions-for-use').get_text(separator=' ', strip=True)
 
-    directions = find_text_near_keyword(soup, direction_keywords)
+    result = None
 
-    if directions:
-        return directions
+    # Try strategies in order
+    if not result: result = find_by_specific_attributes(soup, attribute_keywords)
+    if not result: result = find_by_heading_sibling(soup, text_keywords)
+    if not result: result = find_by_keyword_in_tag(soup, text_keywords)
+    if not result: result = find_by_definition_list(soup, text_keywords)
+    if not result: result = find_by_parent_text(soup, text_keywords)
+
+    if result:
+        result = re.sub(r'\s{2,}', ' ', result).strip()
+        return result
     else:
-        logging.warning("Could not find directions using keyword search.")
+        logging.warning(f"All strategies FAILED for directions on {url}")
         return "Directions not found (check HTML structure or image)"
 
-# --- Main Scraping Function (callable) ---
+
+# --- Main Scraping Function (Largely unchanged, calls new parsers) ---
 
 def scrape_single_url(url):
     """
-    Scrapes a single URL for ingredients and directions.
+    Scrapes a single URL for ingredients and directions using multi-strategy parsing.
     Returns a dictionary with results.
     """
-    # Basic URL validation
     if not isinstance(url, str) or not url.startswith(('http://', 'https://')):
         logging.warning(f"Invalid URL format: {url}")
-        return {
-            'URL': url,
-            'Ingredients': 'Invalid URL format',
-            'Directions': 'Invalid URL format',
-            'Status': 'Failed - Invalid URL'
-        }
+        return {'URL': url, 'Ingredients': 'Invalid URL format', 'Directions': 'Invalid URL format', 'Status': 'Failed - Invalid URL'}
 
     html_content = fetch_page(url)
-    # Add delay *after* fetching, before heavy parsing, to respect servers
-    logging.info(f"Waiting {REQUEST_DELAY_SECONDS} seconds before processing...")
+    logging.info(f"Waiting {REQUEST_DELAY_SECONDS} seconds before processing {url}...")
     time.sleep(REQUEST_DELAY_SECONDS)
 
     if html_content:
         try:
-            # Use lxml for better performance and handling of broken HTML
             soup = BeautifulSoup(html_content, 'lxml')
 
-            ingredients = parse_ingredients(soup)
-            directions = parse_directions(soup)
+            ingredients = parse_ingredients(soup, url)
+            directions = parse_directions(soup, url)
 
-            # Log success based on finding *something*
+            # Determine status based on findings
             status = 'Success'
-            if ingredients.startswith("Ingredients not found") and directions.startswith("Directions not found"):
-                status = 'Partial Success - Data likely incomplete or in images'
-            elif ingredients.startswith("Ingredients not found"):
-                 status = 'Partial Success - Ingredients missing'
-            elif directions.startswith("Directions not found"):
-                 status = 'Partial Success - Directions missing'
+            not_found_ingredients = ingredients.startswith("Ingredients not found")
+            not_found_directions = directions.startswith("Directions not found")
+            partial_ingredients = PARTIAL_INGREDIENTS_NOTE in ingredients
+
+            if not_found_ingredients and not_found_directions:
+                status = 'Failed - No Data Found via HTML Strategies'
+            elif not_found_ingredients:
+                status = 'Partial Success - Directions Found Only'
+            elif not_found_directions:
+                 status = 'Partial Success - Ingredients Found Only'
+                 if partial_ingredients: status += " (Partial Possible)" # Indicate if only 'other' ingredients might be present
+            elif partial_ingredients:
+                 status = 'Partial Success - Directions & Partial Ingredients Found'
+
+            # If both found and no partial note, it's full success (from HTML perspective)
+            elif not partial_ingredients and not not_found_ingredients and not not_found_directions:
+                 status = 'Success - Ingredients & Directions Found'
 
 
             logging.info(f"-> Scrape result for {url}: Status={status}")
@@ -224,21 +272,18 @@ def scrape_single_url(url):
             }
 
         except Exception as e:
-            logging.error(f"Error parsing HTML for {url}: {e}")
+            logging.error(f"Error parsing HTML for {url}: {e}", exc_info=True)
             return {
                 'URL': url,
                 'Ingredients': 'Parsing Error',
                 'Directions': 'Parsing Error',
-                'Status': f'Failed - Parsing Error ({e})'
+                'Status': f'Failed - Parsing Error'
             }
     else:
-        # Fetch error details are logged in fetch_page
+        # Fetch error details logged in fetch_page
         return {
             'URL': url,
             'Ingredients': 'Fetch Error',
             'Directions': 'Fetch Error',
             'Status': 'Failed - Could not fetch URL'
         }
-
-# Note: No `if __name__ == "__main__":` block here,
-# as this file is intended to be imported as a module.
